@@ -1,0 +1,13 @@
+/target
+TODO-LIST.md
+
+# Tool-specific agent pointers (thin @AGENTS.md imports, never committed)
+CLAUDE.md
+CANON.md
+GEMINI.md
+.cursor/
+.aider*
+.windsurfrules
+
+# Private reference material, never committed
+/.nocommit

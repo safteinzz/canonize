@@ -1,0 +1,36 @@
+title: RULES
+
+intro:
+  - How I want every coding agent to work, in every project.
+
+format:
+  about: How this file is read and written. It is the only part of the file that is not a rule, and it says nothing about how any other file is written.
+  keys:
+    name: A short label to cite the rule by. It is not a directive.
+    case: The situation the rule applies to. `~` means wherever its section applies.
+    check: Yes/no questions that confirm the case, one per line. Every one must be answered yes for the rule to apply.
+    rule: The directives, one per line. Each says what to do or what never to do.
+    why: Optional. The reason behind the directives, so they can be applied to cases they do not name. It is never a directive itself.
+    examples: Optional. Named examples of what the rule covers. They illustrate the rule and are never rules themselves.
+    exceptions: Where the rule does not apply, one per line.
+  reading:
+    - Before acting on a rule, confirm the thing in front of you is inside its case and answers yes to every check, then check it against its exceptions; only then follow every line of its `rule`.
+  writing:
+    - Every rule has `name`, `case`, `check`, `rule` and `exceptions`; `why` and `examples` are the only optional keys.
+    - Keys go in the order listed under `keys`.
+    - Each `rule` line is one directive in the imperative, addressed to you. It says what to do, or starts with `Never` and says what not to do. A condition comes first (`When …,`).
+    - A `rule` line never explains, describes or asks. Reasons go in `why`, examples in `examples`.
+    - One sentence per line in `rule` and `exceptions`, so each line can be read and matched on its own.
+    - The shape is checked by `rules.schema.json`.
+
+sections:
+  - section: Git
+    rules:
+      - name: Commit only when asked
+        case: ~
+        check: []
+        rule:
+          - Commit, push or publish only when I say so, in the turn I say it.
+          - Never push as the tail of a commit.
+        why: I test interactively before anything is committed, and a push cannot be taken back.
+        exceptions: []

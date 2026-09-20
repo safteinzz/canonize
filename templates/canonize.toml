@@ -1,0 +1,43 @@
+# canonize.toml: where the pieces of your canon are, and which agents it
+# reaches. `canon` reads it on every start; in the dashboard, e opens it here.
+#
+# A value in quotes is text: "rules.yaml". A list goes in square brackets,
+# each item in quotes and separated by commas: ["~/dev", "~/work"]. A line
+# starting with # is a note and is ignored.
+
+# Folders to look through for projects (anything with a CLAUDE.md or
+# AGENTS.md, up to three levels down). [] looks nowhere.
+projects = {projects}
+
+[source]
+# Every path here is inside this folder unless it starts with ~ or /.
+
+# The rules every agent follows.
+rules  = "{rules}"
+# The schema `canon validate` holds the rules to. "" for none.
+schema = "{schema}"
+# Your house files: one * allowed in the file name. "" for none.
+house  = "{house}"
+# The folder holding one folder per skill, each with a SKILL.md.
+skills = "{skills}"
+
+# Every agent canonize knows (claude, codex, pi, opencode) comes with its own
+# paths. To change one, remove the # in front of its lines and edit them:
+#
+# [agents.claude]
+# rules       = "~/.claude/CLAUDE.md"
+# rules_mode  = "import"         # import | link | off
+# skills      = "~/.claude/skills"
+# skills_mode = "per-skill"      # per-skill | folder | off
+#
+# To leave an agent out without deleting anything:
+# [agents.codex]
+# enabled = false
+#
+# An agent canonize does not know needs its home, rules and skills:
+# [agents.myagent]
+# home        = "~/.myagent"
+# rules       = "~/.myagent/AGENTS.md"
+# rules_mode  = "link"
+# skills      = "~/.myagent/skills"
+# skills_mode = "folder"
