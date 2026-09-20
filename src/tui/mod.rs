@@ -600,17 +600,28 @@ impl App {
             self.set_status(format!("nothing to {}: {label}", verb.to_lowercase()));
             return;
         }
-        // Deleting a skill that exists nowhere else takes its typed name.
-        if let [Change::DeleteDir { at }] = changes.as_slice() {
+        // Deleting a real folder takes its typed name.
+        if let Some(at) = deleted_dir(&changes) {
             let name = at
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
+            let in_canon = self
+                .cfg
+                .as_ref()
+                .is_some_and(|cfg| at.starts_with(&cfg.source.skills));
+            let message = if in_canon {
+                format!(
+                    "Delete {name} from your canon? The folder goes, scripts and all, and so does every agent's link to it."
+                )
+            } else {
+                format!(
+                    "Delete {name}? It is a real folder that exists nowhere else, scripts and all, so it cannot be brought back."
+                )
+            };
             self.typed = Some(Typed {
                 title: "delete skill".into(),
-                message: format!(
-                    "Delete {name}? It is a real folder that exists nowhere else, scripts and all, so it cannot be brought back."
-                ),
+                message,
                 name,
                 input: String::new(),
                 changes,
@@ -674,6 +685,37 @@ impl App {
         ];
         // A choice that would do nothing is noise.
         items.retain(|(_, changes): &(String, Vec<Change>)| !changes.is_empty());
+        // The canon's own copy: deleting it takes every link with it, since a
+        // link left behind points at nothing.
+        if remove
+            && rows
+                .iter()
+                .position(|&x| x == r)
+                .is_some_and(|i| i < plan.canon_skills)
+        {
+            let at = cfg.source.skills.join(&skill);
+            let mut changes: Vec<Change> = Vec::new();
+            for c in &plan.cells[r] {
+                // A folder-mode agent's cell is its whole skills folder, which
+                // this delete must not take.
+                if let Some(Change::Unlink { at }) = &c.undo
+                    && at.file_name().is_some_and(|n| n == skill.as_str())
+                    && !changes
+                        .iter()
+                        .any(|x| matches!(x, Change::Unlink { at: a } if a == at))
+                {
+                    changes.push(Change::Unlink { at: at.clone() });
+                }
+            }
+            changes.push(Change::DeleteDir { at });
+            items.push((
+                format!("delete {skill} from your canon (type its name)"),
+                vec![Change::Batch {
+                    what: format!("delete {skill} from your canon and every link to it"),
+                    changes,
+                }],
+            ));
+        }
         let cell = &plan.cells[r][self.col];
         if cell.state == State::Own {
             let (label, change) = if remove {
@@ -1085,4 +1127,14 @@ fn install_panic_hook() {
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         hook(info);
     }));
+}
+
+/// The real folder a delete would remove, inside a batch as well, so the typed
+/// gate is never skipped by wrapping the delete in one.
+fn deleted_dir(changes: &[Change]) -> Option<&PathBuf> {
+    changes.iter().find_map(|c| match c {
+        Change::DeleteDir { at } => Some(at),
+        Change::Batch { changes, .. } => deleted_dir(changes),
+        _ => None,
+    })
 }

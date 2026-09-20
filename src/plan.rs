@@ -53,7 +53,7 @@ impl State {
     pub fn word(&self) -> &'static str {
         match self {
             State::Linked => "linked",
-            State::Missing => "missing",
+            State::Missing => "unwired",
             State::Broken(_) => "broken",
             State::Foreign(_) => "foreign",
             State::Own => "own",
