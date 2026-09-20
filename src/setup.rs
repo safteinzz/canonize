@@ -380,3 +380,165 @@ pub fn adopt(from: &Path, skills: &Path) -> Result<PathBuf> {
     symlink(&to, from).with_context(|| format!("could not link `{}`", tilde(from)))?;
     Ok(to)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tmp::Temp;
+
+    #[test]
+    fn a_canon_is_recognised_by_the_rules_file_an_agent_already_reads() {
+        let t = Temp::new();
+        let rules = t.write("canon/rules.yaml", "title: MYRULES\n");
+        t.write("canon/rules.schema.json", "{}");
+        t.write("canon/house/HOUSE-RUST.md", "");
+        let by = t.write("claude/CLAUDE.md", "");
+
+        let found = around(&rules, &by).expect("the rules file should be recognised");
+        assert_eq!(found.root, t.at("canon"));
+        assert_eq!(found.schema, Some(t.at("canon/rules.schema.json")));
+        assert_eq!(found.house.as_deref(), Some("house/*.md"));
+    }
+
+    #[test]
+    fn a_schema_named_after_the_rules_file_is_found_too() {
+        let t = Temp::new();
+        let rules = t.write("canon/MYRULES.yaml", "title: MYRULES\n");
+        t.write("canon/MYRULES.schema.json", "{}");
+        let by = t.write("claude/CLAUDE.md", "");
+
+        let found = around(&rules, &by).expect("the rules file should be recognised");
+        assert_eq!(found.schema, Some(t.at("canon/MYRULES.schema.json")));
+        assert_eq!(found.house, None, "there are no house files to find");
+    }
+
+    #[test]
+    fn a_house_file_imported_on_its_own_is_never_taken_for_the_rules() {
+        let t = Temp::new();
+        let house = t.write("canon/HOUSE-RUST.md", "");
+        let by = t.write("claude/CLAUDE.md", "");
+        assert!(around(&house, &by).is_none());
+        assert!(
+            around(&t.at("canon/gone.yaml"), &by).is_none(),
+            "a file that is not there is not a canon"
+        );
+    }
+
+    #[test]
+    fn the_house_patterns_offered_are_the_ones_that_match_something() {
+        let t = Temp::new();
+        t.write("canon/HOUSE-RUST.md", "");
+        t.write("canon/HOUSE-TUI.md", "");
+        assert_eq!(
+            house_patterns(&t.at("canon")),
+            [("HOUSE-*.md".to_string(), 2)]
+        );
+    }
+
+    #[test]
+    fn the_files_offered_as_rules_leave_out_house_files_and_readmes() {
+        let t = Temp::new();
+        t.write("canon/rules.yaml", "");
+        t.write("canon/MYRULES.md", "");
+        t.write("canon/HOUSE-RUST.md", "");
+        t.write("canon/README.md", "");
+        t.write("canon/rules.schema.json", "");
+        assert_eq!(rule_files(&t.at("canon")), ["MYRULES.md", "rules.yaml"]);
+        assert_eq!(schema_files(&t.at("canon")), ["rules.schema.json"]);
+    }
+
+    #[test]
+    fn setup_never_writes_over_a_config_that_is_already_there() {
+        let t = Temp::new();
+        let root = t.dir("canon");
+        let mine = "projects = []\n";
+        fs::write(root.join(CONFIG_FILE), mine).expect("could not write");
+        let choice = Choice {
+            root: root.clone(),
+            rules: Pick::New,
+            schema: Pick::None,
+            house: None,
+            skills: "skills".to_string(),
+            projects: Vec::new(),
+        };
+
+        assert!(
+            apply(&choice).is_err(),
+            "setup must refuse a canon it did not write"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join(CONFIG_FILE)).expect("the config should still be there"),
+            mine
+        );
+        assert!(
+            !root.join("rules.yaml").exists(),
+            "nothing else is written once it refuses"
+        );
+    }
+
+    #[test]
+    fn the_config_setup_writes_reads_back_as_the_answers_given() {
+        let t = Temp::new();
+        let root = t.dir("canon");
+        let choice = Choice {
+            root: root.clone(),
+            rules: Pick::Existing("MYRULES.md".to_string()),
+            schema: Pick::None,
+            house: Some("HOUSE-*.md".to_string()),
+            skills: "skills".to_string(),
+            projects: vec!["~/dev".to_string(), "~/work".to_string()],
+        };
+        fs::write(root.join(CONFIG_FILE), choice.config_text()).expect("could not write");
+
+        let cfg = config::load_from(&root).expect("the config setup writes has to load");
+        assert_eq!(cfg.source.rules, cfg.source.root.join("MYRULES.md"));
+        assert!(
+            cfg.source.schema.as_os_str().is_empty(),
+            "no schema was chosen"
+        );
+        assert_eq!(cfg.source.house, "HOUSE-*.md");
+        assert_eq!(
+            cfg.projects,
+            [config::expand("~/dev"), config::expand("~/work")]
+        );
+    }
+
+    #[test]
+    fn adopting_a_skill_moves_the_whole_folder_and_leaves_a_link_in_its_place() {
+        let t = Temp::new();
+        let from = t.skill("claude/skills/audit", "audit");
+        t.write("claude/skills/audit/run.sh", "echo hi\n");
+        let skills = t.at("canon/skills");
+
+        let to = adopt(&from, &skills).expect("the skill should move");
+        assert_eq!(to, skills.join("audit"));
+        assert_eq!(
+            fs::read_link(&from).expect("a link should be left in its place"),
+            to
+        );
+        assert_eq!(
+            fs::read_to_string(from.join("run.sh")).expect("the agent should see no difference"),
+            "echo hi\n",
+            "scripts move with the skill"
+        );
+    }
+
+    #[test]
+    fn adopting_refuses_a_link_and_a_name_the_canon_already_has() {
+        let t = Temp::new();
+        let from = t.skill("claude/skills/audit", "audit");
+        let skills = t.dir("canon/skills");
+        t.skill("canon/skills/audit", "audit");
+        assert!(
+            adopt(&from, &skills).is_err(),
+            "a skill the canon already has would be overwritten"
+        );
+
+        let linked = t.at("claude/skills/rust");
+        symlink(t.skill("canon/skills/rust", "rust"), &linked).expect("could not link");
+        assert!(
+            adopt(&linked, &skills).is_err(),
+            "a link is already managed, so there is nothing to move"
+        );
+    }
+}

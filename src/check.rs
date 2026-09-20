@@ -203,3 +203,138 @@ fn check_skill(source: &Source, name: &str, problems: &mut Vec<String>) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tmp::{Temp, source};
+
+    /// A rules file in the shape the format block describes.
+    fn rules(body: &str) -> String {
+        format!(
+            "title: MYRULES\nformat:\n  keys:\n    name: A label.\n    case: The situation.\n    rule: The directives.\nsections:\n{body}"
+        )
+    }
+
+    const ONE_RULE: &str = "  - section: Comments\n    rules:\n      - name: One clause\n        case: ~\n        rule:\n          - Keep a comment to one clause.\n";
+
+    #[test]
+    fn a_canon_whose_rules_and_skills_are_sound_has_no_problems() {
+        let t = Temp::new();
+        t.write("rules.yaml", &rules(ONE_RULE));
+        t.skill("skills/audit", "audit");
+        t.write("house/HOUSE-RUST.md", "");
+        let report = run(&source(t.path()));
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert_eq!(report.rules, Some(1));
+        assert_eq!(report.skills, 1);
+        assert_eq!(report.house, 1);
+    }
+
+    #[test]
+    fn every_rule_is_counted_wherever_it_sits_in_the_file() {
+        let t = Temp::new();
+        let extra = "  - section: Tests\n    rules:\n      - name: What earns a test\n        case: ~\n        rule:\n          - Write a test only for a regression.\n      - name: Test names\n        case: ~\n        rule:\n          - Name a test after the invariant it pins.\n";
+        t.write("rules.yaml", &rules(&format!("{ONE_RULE}{extra}")));
+        assert_eq!(run(&source(t.path())).rules, Some(3));
+    }
+
+    #[test]
+    fn a_rule_with_its_keys_out_of_the_order_format_lists_is_a_problem() {
+        let t = Temp::new();
+        let swapped = "  - section: Comments\n    rules:\n      - name: One clause\n        rule:\n          - Keep a comment to one clause.\n        case: ~\n";
+        t.write("rules.yaml", &rules(swapped));
+        let problems = run(&source(t.path())).problems;
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("One clause"), "{}", problems[0]);
+    }
+
+    #[test]
+    fn a_rule_using_a_key_the_format_block_does_not_define_is_a_problem() {
+        let t = Temp::new();
+        let extra_key = "  - section: Comments\n    rules:\n      - name: One clause\n        case: ~\n        rule:\n          - Keep a comment to one clause.\n        checks: []\n";
+        t.write("rules.yaml", &rules(extra_key));
+        let problems = run(&source(t.path())).problems;
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("checks"), "{}", problems[0]);
+    }
+
+    #[test]
+    fn a_rules_file_that_breaks_its_schema_is_a_problem() {
+        let t = Temp::new();
+        t.write("rules.yaml", &rules(ONE_RULE));
+        t.write(
+            "rules.schema.json",
+            "{\"type\": \"object\", \"required\": [\"intro\"]}",
+        );
+        let problems = run(&source(t.path())).problems;
+        assert_eq!(problems.len(), 1, "{problems:?}");
+    }
+
+    #[test]
+    fn a_rules_file_that_is_not_yaml_only_has_to_be_there() {
+        let t = Temp::new();
+        let mut s = source(t.path());
+        s.rules = t.write("MYRULES.md", "# My rules\n\nWhatever I like, in prose.\n");
+        let report = run(&s);
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert_eq!(
+            report.rules, None,
+            "a file that is not YAML has no rules to count"
+        );
+    }
+
+    #[test]
+    fn a_rules_file_that_is_missing_is_a_problem() {
+        let t = Temp::new();
+        let problems = run(&source(t.path())).problems;
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("rules.yaml"), "{}", problems[0]);
+    }
+
+    #[test]
+    fn a_canon_with_no_rules_file_at_all_is_valid() {
+        let t = Temp::new();
+        let mut s = source(t.path());
+        s.rules = std::path::PathBuf::new();
+        let report = run(&s);
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+        assert_eq!(report.rules, None);
+    }
+
+    #[test]
+    fn a_skill_with_no_skill_md_is_a_problem_naming_it() {
+        let t = Temp::new();
+        t.write("rules.yaml", &rules(ONE_RULE));
+        t.dir("skills/half-done");
+        let problems = run(&source(t.path())).problems;
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].contains("half-done/SKILL.md"),
+            "{}",
+            problems[0]
+        );
+    }
+
+    #[test]
+    fn a_skill_whose_frontmatter_has_no_name_or_description_is_a_problem() {
+        let t = Temp::new();
+        t.write("rules.yaml", &rules(ONE_RULE));
+        t.write("skills/audit/SKILL.md", "---\nname: audit\n---\n\nbody\n");
+        let problems = run(&source(t.path())).problems;
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("description"), "{}", problems[0]);
+    }
+
+    #[test]
+    fn a_skill_md_written_on_windows_still_reads() {
+        let t = Temp::new();
+        t.write("rules.yaml", &rules(ONE_RULE));
+        t.write(
+            "skills/audit/SKILL.md",
+            "---\r\nname: audit\r\ndescription: audits\r\n---\r\n\r\nbody\r\n",
+        );
+        let problems = run(&source(t.path())).problems;
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+}

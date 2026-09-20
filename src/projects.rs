@@ -396,3 +396,176 @@ pub fn guess() -> Vec<String> {
     .map(str::to_string)
     .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tmp::{self, Temp};
+
+    /// A canon with one house file, and `dev/` as the folder to look in.
+    fn world() -> (Temp, Config, PathBuf) {
+        let t = Temp::new();
+        t.write("canon/rules.yaml", "title: MYRULES\n");
+        let house = t.write("canon/house/HOUSE-RUST.md", "# HOUSE-RUST\n");
+        t.dir("dev");
+        let cfg = tmp::config(tmp::source(&t.at("canon")), Vec::new(), vec![t.at("dev")]);
+        (t, cfg, house)
+    }
+
+    fn only(cfg: &Config) -> Project {
+        let mut built = Projects::build(cfg);
+        assert_eq!(built.list.len(), 1, "one project was expected");
+        built.list.remove(0)
+    }
+
+    fn apply(changes: Vec<Change>) {
+        for change in changes {
+            change.run().expect("a change the plan offered should run");
+        }
+    }
+
+    #[test]
+    fn a_project_is_the_first_folder_with_an_instruction_file_within_three_levels() {
+        let (t, cfg, _) = world();
+        t.write("dev/app/CLAUDE.md", "");
+        t.write("dev/crates/tools/cli/AGENTS.md", "");
+        t.write("dev/app/sub/CLAUDE.md", "");
+        t.write("dev/a/b/c/d/CLAUDE.md", "");
+
+        let roots: Vec<PathBuf> = Projects::build(&cfg)
+            .list
+            .iter()
+            .map(|p| p.root.clone())
+            .collect();
+        assert_eq!(roots, [t.at("dev/app"), t.at("dev/crates/tools/cli")]);
+    }
+
+    #[test]
+    fn hidden_and_build_folders_are_never_walked_into() {
+        let (t, cfg, _) = world();
+        t.write("dev/.cache/app/CLAUDE.md", "");
+        t.write("dev/mono/target/old/CLAUDE.md", "");
+        t.write("dev/mono/node_modules/dep/CLAUDE.md", "");
+        t.write("dev/app/CLAUDE.md", "");
+
+        let roots: Vec<PathBuf> = Projects::build(&cfg)
+            .list
+            .iter()
+            .map(|p| p.root.clone())
+            .collect();
+        assert_eq!(roots, [t.at("dev/app")]);
+    }
+
+    #[test]
+    fn a_house_import_sitting_in_claude_md_moves_into_canon_md() {
+        let (t, cfg, house) = world();
+        t.write(
+            "dev/app/CLAUDE.md",
+            &format!("# app\n\n@{}\n\nmy own line\n", house.display()),
+        );
+
+        let project = only(&cfg);
+        assert_eq!(project.cells[0].state.word(), "broken");
+        apply(
+            project
+                .cells
+                .iter()
+                .filter_map(|c| c.change.clone())
+                .collect(),
+        );
+        apply(project.wiring_changes());
+
+        let canon =
+            fs::read_to_string(t.at("dev/app/CANON.md")).expect("CANON.md should be written");
+        assert!(canon.contains(&format!("@{}", house.display())), "{canon}");
+        let claude =
+            fs::read_to_string(t.at("dev/app/CLAUDE.md")).expect("CLAUDE.md should be there");
+        assert!(
+            !claude.contains("HOUSE-RUST.md"),
+            "the house import moved out: {claude}"
+        );
+        assert!(
+            claude.contains("@CANON.md"),
+            "Claude is pointed at CANON.md: {claude}"
+        );
+        assert!(claude.contains("# app") && claude.contains("my own line"));
+
+        let project = only(&cfg);
+        assert_eq!(project.cells[0].state.word(), "linked");
+        assert!(!Projects::build(&cfg).drifted());
+    }
+
+    #[test]
+    fn the_same_house_file_imported_in_two_files_leaves_no_copy_behind() {
+        let (t, cfg, house) = world();
+        let line = format!("@{}\n", house.display());
+        t.write("dev/app/CLAUDE.md", &format!("# app\n{line}"));
+        t.write("dev/app/AGENTS.md", &format!("# app\n{line}"));
+
+        let project = only(&cfg);
+        apply(
+            project
+                .cells
+                .iter()
+                .filter_map(|c| c.change.clone())
+                .collect(),
+        );
+
+        for file in ["dev/app/CLAUDE.md", "dev/app/AGENTS.md"] {
+            let text = fs::read_to_string(t.at(file)).expect("the file should be there");
+            assert!(
+                !text.contains("HOUSE-RUST.md"),
+                "{file} still imports it: {text}"
+            );
+        }
+        assert_eq!(only(&cfg).cells[0].state.word(), "linked");
+    }
+
+    #[test]
+    fn an_import_added_and_then_taken_back_leaves_no_canon_md() {
+        let (t, cfg, _) = world();
+        t.write("dev/app/CLAUDE.md", "# app\n");
+
+        let project = only(&cfg);
+        assert_eq!(project.cells[0].state.word(), "unwired");
+        apply(
+            project
+                .cells
+                .iter()
+                .filter_map(|c| c.change.clone())
+                .collect(),
+        );
+        assert!(t.at("dev/app/CANON.md").is_file());
+
+        apply(only(&cfg).undos());
+        assert!(
+            !t.at("dev/app/CANON.md").exists(),
+            "an empty CANON.md is canonize's own leftover"
+        );
+    }
+
+    #[test]
+    fn the_line_that_loads_canon_md_is_not_a_dead_import() {
+        let (t, cfg, _) = world();
+        t.write("dev/app/CLAUDE.md", "# app\n\n@CANON.md\n");
+
+        let project = only(&cfg);
+        assert!(
+            project.dead.is_empty(),
+            "CANON.md is written by the first import, not missing: {:?}",
+            project.dead
+        );
+    }
+
+    #[test]
+    fn an_import_naming_a_file_that_exists_nowhere_is_listed() {
+        let (t, cfg, _) = world();
+        let gone = t.at("nowhere/gone.md");
+        t.write(
+            "dev/app/CLAUDE.md",
+            &format!("# app\n\n@{}\n", gone.display()),
+        );
+
+        assert_eq!(only(&cfg).dead, [format!("@{}", gone.display())]);
+    }
+}

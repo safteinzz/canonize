@@ -333,3 +333,130 @@ pub fn skill_names(source: &Source) -> Vec<String> {
     names.sort();
     names
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tmp::{Temp, source};
+
+    fn names(files: &[PathBuf]) -> Vec<String> {
+        files
+            .iter()
+            .map(|f| {
+                f.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_path_written_with_a_tilde_expands_back_to_the_same_path() {
+        let inside = home().join("dotfiles/canon/rules.yaml");
+        assert_eq!(
+            expand(&tilde(&inside)),
+            inside,
+            "an import line is written with `tilde` and read back with `expand`, so an agent's import would name another file"
+        );
+        let outside = PathBuf::from("/etc/hosts");
+        assert_eq!(expand(&tilde(&outside)), outside);
+        assert_eq!(expand(&tilde(&home())), home());
+    }
+
+    #[test]
+    fn the_house_pattern_takes_files_by_prefix_and_suffix_and_nothing_else() {
+        let t = Temp::new();
+        t.write("HOUSE-RUST.md", "");
+        t.write("HOUSE-TUI.md", "");
+        t.write("README.md", "");
+        t.write("HOUSE-RUST.md.bak", "");
+        t.dir("HOUSE-FOLDER.md");
+        let mut s = source(t.path());
+        s.house = "HOUSE-*.md".to_string();
+        assert_eq!(names(&house_files(&s)), ["HOUSE-RUST.md", "HOUSE-TUI.md"]);
+    }
+
+    #[test]
+    fn a_pattern_with_no_star_names_exactly_one_file() {
+        let t = Temp::new();
+        t.write("AGENTS.md", "");
+        t.write("AGENTS.md.old", "");
+        let mut s = source(t.path());
+        s.house = "AGENTS.md".to_string();
+        assert_eq!(names(&house_files(&s)), ["AGENTS.md"]);
+    }
+
+    #[test]
+    fn an_empty_name_in_the_config_turns_that_file_off() {
+        let t = Temp::new();
+        t.write("rules.yaml", "title: x\n");
+        t.write("house/HOUSE-RUST.md", "");
+        t.write(
+            CONFIG_FILE,
+            "[source]\nrules = \"\"\nschema = \"\"\nhouse = \"\"\n",
+        );
+        let cfg = load_from(t.path()).expect("the config should load");
+        assert!(
+            cfg.source.rules.as_os_str().is_empty(),
+            "an empty `rules` means the user keeps their rules in each agent's own file"
+        );
+        assert!(cfg.source.schema.as_os_str().is_empty());
+        assert!(house_files(&cfg.source).is_empty());
+    }
+
+    #[test]
+    fn a_name_in_the_config_is_read_inside_the_canon_unless_it_is_absolute() {
+        let t = Temp::new();
+        t.write(
+            CONFIG_FILE,
+            "[source]\nrules = \"MYRULES.md\"\nskills = \"/opt/skills\"\n",
+        );
+        let cfg = load_from(t.path()).expect("the config should load");
+        assert_eq!(cfg.source.rules, cfg.source.root.join("MYRULES.md"));
+        assert_eq!(cfg.source.skills, PathBuf::from("/opt/skills"));
+    }
+
+    #[test]
+    fn an_agent_canonize_does_not_know_needs_home_rules_and_skills() {
+        let t = Temp::new();
+        t.write(CONFIG_FILE, "[agents.zed]\nenabled = true\n");
+        assert!(
+            load_from(t.path()).is_err(),
+            "an unknown agent with no paths has nowhere to link anything"
+        );
+
+        let t = Temp::new();
+        t.write(
+            CONFIG_FILE,
+            "[agents.zed]\nhome = \"/tmp/zed\"\nrules = \"/tmp/zed/RULES.md\"\nskills = \"/tmp/zed/skills\"\n",
+        );
+        let cfg = load_from(t.path()).expect("an unknown agent with all three should load");
+        let zed = cfg
+            .agents
+            .iter()
+            .find(|a| a.name == "zed")
+            .expect("zed should be an agent");
+        assert_eq!(zed.home, PathBuf::from("/tmp/zed"));
+    }
+
+    #[test]
+    fn a_config_key_that_is_not_one_of_ours_is_an_error() {
+        let t = Temp::new();
+        t.write(CONFIG_FILE, "[source]\nrulez = \"rules.yaml\"\n");
+        assert!(
+            load_from(t.path()).is_err(),
+            "a misspelled key must be an error, or it silently does nothing"
+        );
+    }
+
+    #[test]
+    fn only_folders_are_skills_and_hidden_ones_are_not() {
+        let t = Temp::new();
+        t.skill("skills/rust", "rust");
+        t.skill("skills/audit", "audit");
+        t.write("skills/notes.md", "");
+        t.dir("skills/.git");
+        assert_eq!(skill_names(&source(t.path())), ["audit", "rust"]);
+    }
+}

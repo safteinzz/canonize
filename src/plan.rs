@@ -932,3 +932,222 @@ fn import_cell(file: &Path, rules: &Path, root: &Path) -> Cell {
         None => cell(State::Missing, add, None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{RulesMode, SkillsMode};
+    use crate::tmp::{self, Temp};
+
+    /// A canon with two skills and a rules file, and Claude's folder beside it.
+    fn world() -> (Temp, Config) {
+        let t = Temp::new();
+        t.write("canon/rules.yaml", "title: MYRULES\n");
+        t.skill("canon/skills/rust", "rust");
+        t.skill("canon/skills/audit", "audit");
+        t.dir("claude/skills");
+        let cfg = tmp::config(
+            tmp::source(&t.at("canon")),
+            vec![tmp::claude(&t.at("claude"))],
+            Vec::new(),
+        );
+        (t, cfg)
+    }
+
+    fn cell<'a>(plan: &'a Plan, label: &str) -> &'a Cell {
+        let row = plan
+            .rows
+            .iter()
+            .position(|r| r.label() == label)
+            .unwrap_or_else(|| panic!("no row `{label}`"));
+        &plan.cells[row][0]
+    }
+
+    fn apply(plan: &Plan) {
+        for change in plan.changes() {
+            change.run().expect("a change the plan offered should run");
+        }
+    }
+
+    #[test]
+    fn a_skill_the_agent_does_not_have_is_linked_and_then_reads_as_linked() {
+        let (t, cfg) = world();
+        let plan = Plan::build(&cfg);
+        assert_eq!(cell(&plan, "skill rust").state.word(), "unwired");
+        assert!(
+            plan.drifted(),
+            "a missing link is drift, which `status` exits 1 on"
+        );
+
+        apply(&plan);
+
+        let link = t.at("claude/skills/rust");
+        assert_eq!(
+            fs::read_link(&link).expect("the skill should be a link"),
+            t.at("canon/skills/rust")
+        );
+        let plan = Plan::build(&cfg);
+        assert_eq!(cell(&plan, "skill rust").state.word(), "linked");
+        assert!(!plan.drifted(), "nothing should be left for `fix` to do");
+    }
+
+    #[test]
+    fn a_link_pointing_outside_the_canon_is_left_exactly_as_it_was() {
+        let (t, cfg) = world();
+        let elsewhere = t.skill("elsewhere/rust", "rust");
+        symlink(&elsewhere, t.at("claude/skills/rust")).expect("could not link");
+
+        let plan = Plan::build(&cfg);
+        let cell = cell(&plan, "skill rust");
+        assert_eq!(cell.state.word(), "foreign");
+        assert!(cell.change.is_none(), "a foreign link is never repointed");
+        assert!(cell.undo.is_none(), "a foreign link is never deleted");
+
+        apply(&plan);
+        assert_eq!(
+            fs::read_link(t.at("claude/skills/rust")).expect("the link should still be there"),
+            elsewhere
+        );
+    }
+
+    #[test]
+    fn a_real_folder_where_a_link_belongs_keeps_its_files() {
+        let (t, cfg) = world();
+        t.write("claude/skills/rust/SKILL.md", "the agent's own copy\n");
+
+        let plan = Plan::build(&cfg);
+        let cell = cell(&plan, "skill rust");
+        assert_eq!(cell.state.word(), "foreign");
+        assert!(cell.change.is_none());
+
+        apply(&plan);
+        assert_eq!(
+            fs::read_to_string(t.at("claude/skills/rust/SKILL.md")).expect("it should still exist"),
+            "the agent's own copy\n"
+        );
+    }
+
+    #[test]
+    fn an_import_of_a_rules_file_that_moved_is_repointed_and_the_rest_of_the_file_stays() {
+        let (t, cfg) = world();
+        let gone = t.at("old-canon/rules.yaml");
+        t.write(
+            "claude/CLAUDE.md",
+            &format!("# my own notes\n\n@{}\n\nmore of mine\n", gone.display()),
+        );
+
+        let plan = Plan::build(&cfg);
+        let cell = cell(&plan, "rules.yaml");
+        assert_eq!(cell.state.word(), "broken");
+        apply(&plan);
+
+        let text = fs::read_to_string(t.at("claude/CLAUDE.md")).expect("CLAUDE.md should be there");
+        let imports: Vec<&str> = text.lines().filter(|l| l.starts_with('@')).collect();
+        assert_eq!(
+            imports,
+            [format!("@{}", t.at("canon/rules.yaml").display())],
+            "the stale import is repointed, never left beside a new one"
+        );
+        assert!(
+            text.contains("# my own notes"),
+            "the user's lines are theirs"
+        );
+        assert!(text.contains("more of mine"));
+    }
+
+    #[test]
+    fn an_import_is_never_written_into_a_file_that_links_into_the_canon() {
+        let (t, cfg) = world();
+        let rules = t.at("canon/rules.yaml");
+        symlink(&rules, t.at("claude/CLAUDE.md")).expect("could not link");
+
+        let plan = Plan::build(&cfg);
+        let cell = cell(&plan, "rules.yaml");
+        assert_eq!(
+            cell.state.word(),
+            "foreign",
+            "an import written there would land in the rules file itself"
+        );
+        assert!(cell.change.is_none());
+
+        let refused = Change::AddImport {
+            file: t.at("claude/CLAUDE.md"),
+            line: "@rules.yaml".to_string(),
+        }
+        .run();
+        assert!(refused.is_err(), "the change itself has to refuse it too");
+        assert_eq!(
+            fs::read_to_string(&rules).expect("the rules file should be there"),
+            "title: MYRULES\n",
+            "the rules file must not have been written into"
+        );
+    }
+
+    #[test]
+    fn a_link_to_a_skill_the_canon_no_longer_has_is_deleted() {
+        let (t, cfg) = world();
+        let stale = t.at("claude/skills/gone");
+        symlink(t.at("canon/skills/gone"), &stale).expect("could not link");
+
+        let plan = Plan::build(&cfg);
+        assert_eq!(plan.stale.len(), 1, "the link into the canon is stale");
+        assert!(plan.drifted());
+        apply(&plan);
+        assert!(
+            fs::symlink_metadata(&stale).is_err(),
+            "a link to a skill that is gone points at nothing"
+        );
+    }
+
+    #[test]
+    fn agents_sharing_a_skills_folder_get_one_link() {
+        let t = Temp::new();
+        t.write("canon/rules.yaml", "title: MYRULES\n");
+        t.skill("canon/skills/rust", "rust");
+        t.skill("canon/skills/audit", "audit");
+        t.dir("codex");
+        t.dir("pi");
+        let shared = t.at("agents/skills");
+        let both = |name: &str, home: PathBuf| {
+            tmp::agent(
+                name,
+                &home,
+                &home.join("AGENTS.md"),
+                RulesMode::Link,
+                &shared,
+                SkillsMode::Folder,
+            )
+        };
+        let cfg = tmp::config(
+            tmp::source(&t.at("canon")),
+            vec![both("codex", t.at("codex")), both("pi", t.at("pi"))],
+            Vec::new(),
+        );
+
+        let links = Plan::build(&cfg)
+            .changes()
+            .into_iter()
+            .filter(|c| matches!(c, Change::Link { at, .. } if *at == shared))
+            .count();
+        assert_eq!(links, 1, "two agents reading the same folder need one link");
+    }
+
+    #[test]
+    fn what_canonize_made_is_all_it_takes_back() {
+        let (t, cfg) = world();
+        t.write("claude/CLAUDE.md", "# mine\n");
+        let plan = Plan::build(&cfg);
+        apply(&plan);
+
+        let plan = Plan::build(&cfg);
+        for undo in plan.undos(None) {
+            undo.run().expect("an undo the plan offered should run");
+        }
+        assert!(fs::symlink_metadata(t.at("claude/skills/rust")).is_err());
+        assert_eq!(
+            fs::read_to_string(t.at("claude/CLAUDE.md")).expect("CLAUDE.md should be there"),
+            "# mine\n",
+            "the file is left as the user had it"
+        );
+    }
+}

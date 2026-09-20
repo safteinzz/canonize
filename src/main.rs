@@ -31,6 +31,8 @@ mod plan;
 mod projects;
 mod selfcmd;
 mod setup;
+#[cfg(test)]
+mod tmp;
 mod tui;
 
 use clap::{Parser, Subcommand};
