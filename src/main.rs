@@ -47,10 +47,27 @@ const WAYS: &str = "\x1b[1mWays to run it (not subcommands):\x1b[0m
 
 const AFTER: &str = concat!(
     "\
+\x1b[1mWhat a cell says:\x1b[0m
+  linked, imported  wired to your canon; a project's house import reads `imported`
+  unwired           `fix` wires it        broken  wired to the wrong thing, `fix` repoints it
+  own               only that agent has it, `adopt` takes it into your canon
+  foreign           yours or the agent's, left alone     n/a, off, -  cannot, off, not installed
+
+\x1b[1mCANON.md:\x1b[0m
+  Each project keeps its house imports in its own CANON.md, written only by
+  canonize and kept out of git. Claude loads it from one `@CANON.md` line in the
+  project's CLAUDE.md, pi from an extension and opencode from a setting, both
+  wired by `fix`. Codex cannot load another file, so it gets no house files.
+
 Your canon is `$CANONIZE_SOURCE`, else your config folder (~/.config/canonize,
 and ~/Library/Application Support/canonize on macOS), and holds canonize.toml.
-`status` and `validate` print for people and exit 1 when something needs fixing,
-so a script can gate on them; errors go to stderr and exit non-zero.
+`status` and `validate` print for people and exit 1 when something needs fixing;
+`status --strict` counts foreign and own too, `--json` on either prints it for a
+script, with those state names (`na`, `absent`) and absolute paths. `fix` never
+settles a foreign or own cell, so `status` ends by naming them and what to do,
+and what `validate` reports is yours to edit. Every command that changes
+something takes `-n` (`--dry-run`), a dry run printing the very lines the real
+run would, and writing nothing. Errors go to stderr, exit non-zero.
 Run `canon <command> --help` for a command's details.",
     "\n\n",
     env!("CARGO_PKG_REPOSITORY"),
@@ -88,26 +105,52 @@ struct Cli {
 enum Cmd {
     /// Show which agent has which rules and skills, and what drifted
     ///   -a NAME   only this agent
+    ///   --strict  exit 1 when something needs a person too (foreign, own)
+    ///   --json    print it for a script instead of a person
     #[command(verbatim_doc_comment)]
     Status(cli::AgentArgs),
     /// Fix what is broken or missing: link it, or repoint an import; foreign files stay
     ///   -a NAME   only this agent
-    ///   -n        print what would change and change nothing
+    ///   -n        dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Fix(cli::ChangeArgs),
     /// Delete every link and import canonize made, and nothing else
     ///   -a NAME   only this agent
-    ///   -n        print what would change and change nothing
+    ///   -n        dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Delete(cli::ChangeArgs),
     /// Validate your canon: the rules file against its schema, and every skill's SKILL.md
-    Validate,
-    /// Set canonize up around the rules file your agents already read
-    ///   -n        print what it found and change nothing
+    ///   --json    print it for a script instead of a person
     #[command(verbatim_doc_comment)]
-    Setup(cli::DryArgs),
-    /// Move an agent's own skill into your canon and leave a link in its place  <AGENT> <SKILL>
+    Validate(cli::JsonArgs),
+    /// Set canonize up around the rules file your agents already read
+    ///   -n            dry run: print what it found and change nothing
+    ///   --root DIR    the folder your canon lives in, when it found none
+    ///   --rules NAME  your rules file in it (every answer has a flag)
+    #[command(verbatim_doc_comment)]
+    Setup(cli::SetupArgs),
+    /// Move an agent's own skill into your canon and leave a link in its place  [AGENT] [SKILL]
+    ///   --all     every skill that agent keeps itself, or every agent's
+    ///   -n        dry run: print what would change and change nothing
+    #[command(verbatim_doc_comment)]
     Adopt(cli::AdoptArgs),
+    /// Move a folder that is not a skill out of your canon, back to one agent  [NAME] <AGENT>
+    ///   --all     every folder in your canon that is not a skill
+    ///   --drop    delete your canon's copy, when the agent already has one
+    ///   -n        dry run: print what would change and change nothing
+    #[command(verbatim_doc_comment)]
+    Evict(cli::EvictArgs),
+    /// Move your canon, or something in it, and repoint every import and link  <WHAT> <TO>
+    ///   canon move canon ~/dotfiles/canon        the whole folder, agents repointed
+    ///   canon move HOUSE-WSL.md house            a file inside it, into house/
+    ///   canon move ~/old/canon ~/dotfiles/canon  one already moved: repoint only
+    #[command(verbatim_doc_comment)]
+    Move(cli::MoveArgs),
+    /// Change a setting in canonize.toml, comments and all
+    ///   config set <KEY> <VALUE>...   `agents.pi.skills_mode`, `projects`, `source.rules`
+    ///     -n        dry run: print the line it would write and change nothing
+    #[command(verbatim_doc_comment, subcommand)]
+    Config(cli::ConfigCmd),
     /// Lay out a new canon folder: canonize.toml, rules.yaml, its schema, house/, skills/  [DIR]
     Init(cli::InitArgs),
     /// Manage canonize itself: `self update` reinstalls, `self check` looks for a newer release
@@ -122,9 +165,12 @@ fn main() {
         Some(Cmd::Status(a)) => cli::status(a),
         Some(Cmd::Fix(a)) => cli::fix(a),
         Some(Cmd::Delete(a)) => cli::delete(a),
-        Some(Cmd::Validate) => cli::validate(),
+        Some(Cmd::Validate(a)) => cli::validate(a),
         Some(Cmd::Setup(a)) => cli::setup(a),
         Some(Cmd::Adopt(a)) => cli::adopt(a),
+        Some(Cmd::Evict(a)) => cli::evict(a),
+        Some(Cmd::Move(a)) => cli::move_it(a),
+        Some(Cmd::Config(c)) => cli::config(c),
         Some(Cmd::Init(a)) => cli::init(a),
         Some(Cmd::Selfie(c)) => {
             selfcmd::run(c);

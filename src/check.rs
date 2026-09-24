@@ -34,6 +34,16 @@ pub fn run(source: &Source) -> Report {
     for name in &skills {
         check_skill(source, name, &mut problems);
     }
+    for (name, inside) in config::strays(source) {
+        let at = tilde(&source.skills.join(&name));
+        problems.push(match inside.len() {
+            0 => format!("{at}: not a skill, since it has no SKILL.md"),
+            n => format!(
+                "{at}: not a skill but a folder holding {n} ({}), so no agent can load any of it: move it out of your canon",
+                inside.join(", ")
+            ),
+        });
+    }
     Report {
         problems,
         rules,
@@ -176,9 +186,7 @@ fn check_skill(source: &Source, name: &str, problems: &mut Vec<String>) {
     let file = source.skills.join(name).join("SKILL.md");
     let shown = tilde(&file);
     let Ok(text) = fs::read_to_string(&file) else {
-        problems.push(format!(
-            "{shown}: missing, so no agent can load skill `{name}`"
-        ));
+        problems.push(format!("{shown}: could not be read"));
         return;
     };
     // A file written on Windows carries \r before every newline.
@@ -303,17 +311,34 @@ mod tests {
     }
 
     #[test]
-    fn a_skill_with_no_skill_md_is_a_problem_naming_it() {
+    fn a_folder_with_no_skill_md_is_a_problem_naming_it() {
         let t = Temp::new();
         t.write("rules.yaml", &rules(ONE_RULE));
         t.dir("skills/half-done");
         let problems = run(&source(t.path())).problems;
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(
-            problems[0].contains("half-done/SKILL.md"),
-            "{}",
-            problems[0]
+        assert!(problems[0].contains("half-done"), "{}", problems[0]);
+    }
+
+    #[test]
+    fn a_folder_holding_skills_is_not_itself_a_skill() {
+        let t = Temp::new();
+        t.write("rules.yaml", &rules(ONE_RULE));
+        t.skill("skills/audit", "audit");
+        // What Claude syncs: a bucket, a folder per sync, then the skills.
+        t.skill("skills/synced/6f2e-4a1b/docx", "docx");
+        t.skill("skills/synced/6f2e-4a1b/pptx", "pptx");
+        let report = run(&source(t.path()));
+        assert_eq!(
+            report.skills, 1,
+            "only `audit` is a skill of the canon: {:?}",
+            report.problems
         );
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        let problem = &report.problems[0];
+        for named in ["synced", "docx", "pptx"] {
+            assert!(problem.contains(named), "{problem}");
+        }
     }
 
     #[test]

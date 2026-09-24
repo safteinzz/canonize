@@ -99,8 +99,9 @@ fn render_source(f: &mut Frame, area: Rect, app: &App) {
         if r.problems.is_empty() {
             spans.push(Span::styled("valid", Style::default().fg(Color::Green)));
         } else {
+            let n = r.problems.len();
             spans.push(Span::styled(
-                format!("{} problems (v)", r.problems.len()),
+                format!("{n} problem{} (v)", if n == 1 { "" } else { "s" }),
                 Style::default().fg(Color::Yellow),
             ));
         }
@@ -608,7 +609,9 @@ fn render_project_detail(f: &mut Frame, area: Rect, app: &App) {
         },
     )];
     lines.push(field("project", tilde(&x.root)));
-    lines.push(field("file", tilde(&x.host)));
+    // Named by its key, because the import itself lives in CANON.md and a row
+    // saying `file` beside it reads as the file the import sits in.
+    lines.push(field("o opens", tilde(&x.host)));
     lines.push(field("house", tilde(h)));
     // What Enter does for this cell, named by its verb like the skills tab.
     let toggle = if cell.state == State::Linked {

@@ -12,7 +12,7 @@ Set FontFamily "JetBrainsMono NF"
 Set Theme "Catppuccin Mocha"
 Set FontSize 15
 Set Width 1240
-Set Height 560
+Set Height 620
 Set Padding 20
 
 Hide

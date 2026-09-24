@@ -12,7 +12,7 @@ mod wizard;
 
 use crate::check::{self, Report};
 use crate::config::{self, Config, tilde};
-use crate::plan::{Change, Plan, State};
+use crate::plan::{self, Change, Plan, State};
 use crate::projects::{self, Projects};
 use crate::setup;
 use alert::Note;
@@ -463,22 +463,18 @@ impl App {
         let Some(plan) = &self.plan else { return };
         let not_adopt = |c: &Change| !matches!(c, Change::Adopt { .. });
         let rows_changes = |rows: Vec<usize>| -> Vec<Change> {
-            let mut out: Vec<Change> = Vec::new();
-            for r in rows {
-                for c in plan.cells[r].iter().filter_map(|c| c.change.clone()) {
-                    if not_adopt(&c) && !out.contains(&c) {
-                        out.push(c);
-                    }
-                }
-            }
-            out
+            plan::dedup(
+                rows.into_iter()
+                    .flat_map(|r| plan.cells[r].iter().filter_map(|c| c.change.clone()))
+                    .filter(not_adopt),
+            )
         };
         // F fixes what the tab shows, nothing beyond it.
         let (changes, what) = match self.view {
             View::Agents => (rows_changes(plan.setup_rows()), "every agent's setup"),
             View::Skills => {
                 let mut c = rows_changes(plan.skill_rows());
-                c.extend(plan.stale.iter().cloned());
+                c.extend(plan.stale_for(None).into_iter().cloned());
                 (c, "every missing or broken skill link")
             }
             View::Projects => (
@@ -564,18 +560,19 @@ impl App {
         let mut items = vec![
             (
                 format!("{file} {to} {name}"),
-                wired(x, pick(&x.cells[self.pcol]).into_iter().collect()),
+                plan::dedup(wired(x, pick(&x.cells[self.pcol]).into_iter().collect()).into_iter()),
             ),
             (
                 format!("every house file {to} {name}"),
-                wired(x, x.cells.iter().filter_map(pick).collect()),
+                plan::dedup(wired(x, x.cells.iter().filter_map(pick).collect()).into_iter()),
             ),
             (
                 format!("{file} {to} every project"),
-                p.list
-                    .iter()
-                    .flat_map(|y| wired(y, pick(&y.cells[self.pcol]).into_iter().collect()))
-                    .collect(),
+                plan::dedup(
+                    p.list
+                        .iter()
+                        .flat_map(|y| wired(y, pick(&y.cells[self.pcol]).into_iter().collect())),
+                ),
             ),
         ];
         // A choice that would do nothing is noise.
@@ -670,17 +667,15 @@ impl App {
         let mut items = vec![
             (
                 format!("{skill}'s link {to} {agent}"),
-                pick(&plan.cells[r][self.col]).into_iter().collect(),
+                plan::dedup(pick(&plan.cells[r][self.col]).into_iter()),
             ),
             (
                 format!("every skill link {to} {agent}"),
-                rows.iter()
-                    .filter_map(|x| pick(&plan.cells[*x][self.col]))
-                    .collect(),
+                plan::dedup(rows.iter().filter_map(|x| pick(&plan.cells[*x][self.col]))),
             ),
             (
                 format!("{skill}'s link {to} every agent"),
-                plan.cells[r].iter().filter_map(pick).collect::<Vec<_>>(),
+                plan::dedup(plan.cells[r].iter().filter_map(pick)),
             ),
         ];
         // A choice that would do nothing is noise.

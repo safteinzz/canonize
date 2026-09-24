@@ -21,6 +21,23 @@ pub enum Row {
 }
 
 impl Row {
+    /// The name the row is asked for by: the file, or the skill.
+    pub fn name(&self) -> &str {
+        match self {
+            Row::Rules(name) | Row::Skill(name) => name,
+            Row::Loader => CANON_FILE,
+        }
+    }
+
+    /// Which kind of row it is, for `--json`.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Row::Rules(_) => "rules",
+            Row::Loader => "loader",
+            Row::Skill(_) => "skill",
+        }
+    }
+
     pub fn label(&self) -> String {
         match self {
             Row::Rules(name) => name.clone(),
@@ -63,9 +80,36 @@ impl State {
         }
     }
 
+    /// The same state as a name that never changes, for `--json`.
+    pub fn id(&self) -> &'static str {
+        match self {
+            State::Linked => "linked",
+            State::Missing => "unwired",
+            State::Broken(_) => "broken",
+            State::Foreign(_) => "foreign",
+            State::Own => "own",
+            State::Na => "na",
+            State::Off => "off",
+            State::Absent => "absent",
+        }
+    }
+
+    /// The reason behind a state, when it has one.
+    pub fn why(&self) -> Option<&str> {
+        match self {
+            State::Broken(why) | State::Foreign(why) => Some(why),
+            _ => None,
+        }
+    }
+
     /// Whether this cell is something `fix` is supposed to have fixed.
     pub fn drifted(&self) -> bool {
         matches!(self, State::Missing | State::Broken(_))
+    }
+
+    /// Whether this cell needs a person: `fix` never touches it.
+    pub fn unsettled(&self) -> bool {
+        matches!(self, State::Foreign(_) | State::Own)
     }
 }
 
@@ -145,6 +189,18 @@ pub enum Change {
         from: PathBuf,
         to: PathBuf,
     },
+    /// Move a folder that is not a skill out of the canon, into the folder of
+    /// the agent that put it there. Nothing is left behind and nothing links.
+    Evict {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    /// Move your canon, or something inside it, somewhere else. What named the
+    /// old path is repointed by the changes that come after it.
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+    },
     RemoveImport {
         file: PathBuf,
         line: String,
@@ -157,7 +213,9 @@ impl Change {
     fn key(&self) -> (&Path, &str) {
         match self {
             Change::Link { at, .. } | Change::Relink { at, .. } | Change::Unlink { at } => (at, ""),
-            Change::Adopt { from, .. } => (from, ""),
+            Change::Adopt { from, .. }
+            | Change::Evict { from, .. }
+            | Change::Rename { from, .. } => (from, ""),
             Change::DeleteDir { at } => (at, "delete"),
             Change::DeleteFile { file, .. } => (file, "delete"),
             Change::JsonUninstruction { file, value } => (file, value),
@@ -193,6 +251,8 @@ impl Change {
             Change::RemoveLine { .. } => "delete line",
             Change::Batch { changes, .. } => changes.first().map_or("do", Change::verb),
             Change::Adopt { .. } => "adopt",
+            Change::Evict { .. } => "evict",
+            Change::Rename { .. } => "move",
         }
     }
 
@@ -236,6 +296,10 @@ impl Change {
             Change::RemoveImport { file, line } => {
                 format!("delete `{line}` from {}", tilde(file))
             }
+            Change::Evict { from, to } => {
+                format!("move {} out of your canon into {}", tilde(from), tilde(to))
+            }
+            Change::Rename { from, to } => format!("move {} to {}", tilde(from), tilde(to)),
         }
     }
 
@@ -280,6 +344,9 @@ impl Change {
                 tilde(to),
                 tilde(from)
             ),
+            Change::Evict { from, to } | Change::Rename { from, to } => {
+                format!("mv {} {}", tilde(from), tilde(to))
+            }
             Change::AddImport { file, line } if is_canon_file(file) => {
                 format!("echo '{line}' >> {}", tilde(file))
             }
@@ -355,6 +422,22 @@ impl Change {
             Change::Batch { changes, .. } => changes.iter().try_for_each(Change::run),
             Change::Adopt { from, to } => {
                 crate::setup::adopt(from, to.parent().unwrap_or(Path::new("/"))).map(|_| ())
+            }
+            Change::Evict { from, to } | Change::Rename { from, to } => {
+                if to.exists() {
+                    bail!("`{}` already exists, so nothing was moved", tilde(to));
+                }
+                if let Some(parent) = to.parent() {
+                    fs::create_dir_all(parent)
+                        .with_context(|| format!("could not create `{}`", tilde(parent)))?;
+                }
+                fs::rename(from, to).with_context(|| {
+                    format!(
+                        "could not move `{}` to `{}` (a different disk needs a manual move)",
+                        tilde(from),
+                        tilde(to)
+                    )
+                })
             }
             Change::AddImport { file, line } if is_canon_file(file) => append_import(file, line),
             Change::AddImport { file, .. }
@@ -500,8 +583,9 @@ pub struct Plan {
     pub foreign: Vec<Vec<String>>,
     /// How many skill rows are the canon's; the rest are agents' own.
     pub canon_skills: usize,
-    /// Links into the source whose skill is gone from it, which apply removes.
-    pub stale: Vec<Change>,
+    /// Per agent, the links in its skills folder with nothing behind them,
+    /// as `(agent, delete it)`. A fix deletes them.
+    pub stale: Vec<(usize, Change)>,
 }
 
 impl Plan {
@@ -528,7 +612,7 @@ impl Plan {
         let mut stale = Vec::new();
         // Per agent, the skills it keeps itself: folders with a SKILL.md.
         let mut owns: Vec<Vec<String>> = Vec::new();
-        for agent in &cfg.agents {
+        for (a, agent) in cfg.agents.iter().enumerate() {
             if !rows.is_empty() && matches!(rows[0], Row::Rules(_)) {
                 cells[0].push(rules_cell(cfg, agent));
             }
@@ -536,7 +620,7 @@ impl Plan {
                 cells[first_skill - 1].push(loader_cell(agent));
             }
             for (i, name) in skills.iter().enumerate() {
-                cells[first_skill + i].push(skill_cell(cfg, agent, name));
+                cells[first_skill + i].push(skill_cell(cfg, agent, name, &skills));
             }
             let (other, gone) = leftovers(cfg, agent, &skills);
             let (own, rest): (Vec<String>, Vec<String>) = other
@@ -544,7 +628,7 @@ impl Plan {
                 .partition(|n| agent.skills.join(n).join("SKILL.md").is_file());
             owns.push(own);
             foreign.push(rest);
-            stale.extend(gone);
+            stale.extend(gone.into_iter().map(|c| (a, c)));
         }
         // Each of those becomes a row of its own, so it is seen without digging.
         let mut own_names: Vec<String> = owns.iter().flatten().cloned().collect();
@@ -592,23 +676,28 @@ impl Plan {
             .flatten()
             .filter_map(|c| c.change.clone())
             .filter(|c| !matches!(c, Change::Adopt { .. }))
-            .chain(self.stale.iter().cloned());
+            .chain(self.stale.iter().map(|(_, c)| c.clone()));
         dedup(all)
     }
 
     /// Every change `fix` would make for one agent.
     pub fn changes_for(&self, agent: usize) -> Vec<Change> {
-        let agent_path = |c: &Change| match c {
-            Change::Unlink { at } => self.cells.iter().any(|r| at.starts_with(&r[agent].at)),
-            _ => false,
-        };
         dedup(
             self.cells
                 .iter()
                 .filter_map(|r| r[agent].change.clone())
                 .filter(|c| !matches!(c, Change::Adopt { .. }))
-                .chain(self.stale.iter().filter(|c| agent_path(c)).cloned()),
+                .chain(self.stale_for(Some(agent)).into_iter().cloned()),
         )
+    }
+
+    /// The stale links of one agent, or of every agent.
+    pub fn stale_for(&self, agent: Option<usize>) -> Vec<&Change> {
+        self.stale
+            .iter()
+            .filter(|(a, _)| agent.is_none_or(|only| only == *a))
+            .map(|(_, c)| c)
+            .collect()
     }
 
     /// Every change `remove` would make, each target once.
@@ -637,12 +726,43 @@ impl Plan {
             .collect()
     }
 
-    pub fn drifted(&self) -> bool {
-        self.cells.iter().flatten().any(|c| c.state.drifted()) || !self.stale.is_empty()
+    /// Whether anything is missing or broken, for one agent or for all of them.
+    pub fn drifted(&self, agent: Option<usize>) -> bool {
+        let cells = self
+            .cells
+            .iter()
+            .flat_map(|r| r.iter().enumerate())
+            .filter(|(a, _)| agent.is_none_or(|only| only == *a))
+            .any(|(_, c)| c.state.drifted());
+        cells || !self.stale_for(agent).is_empty()
+    }
+
+    /// Every cell `fix` leaves alone and a person has to settle, as
+    /// `(row, agent)`: a foreign file, or a skill only one agent has.
+    pub fn unsettled(&self, agent: Option<usize>) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for (r, row) in self.cells.iter().enumerate() {
+            for (a, cell) in row.iter().enumerate() {
+                if cell.state.unsettled() && agent.is_none_or(|only| only == a) {
+                    out.push((r, a));
+                }
+            }
+        }
+        out
+    }
+
+    /// Every skill an agent keeps itself, as `(row, agent)`, for `adopt --all`.
+    pub fn own(&self, agent: Option<usize>) -> Vec<(usize, usize)> {
+        self.unsettled(agent)
+            .into_iter()
+            .filter(|&(r, a)| self.cells[r][a].state == State::Own)
+            .collect()
     }
 }
 
-fn dedup(changes: impl Iterator<Item = Change>) -> Vec<Change> {
+/// One change per target: agents that share a folder ask for the same link,
+/// and running it twice is a failure rather than a second link.
+pub fn dedup(changes: impl Iterator<Item = Change>) -> Vec<Change> {
     let mut out: Vec<Change> = Vec::new();
     for c in changes {
         if !out.iter().any(|o| o.key() == c.key()) {
@@ -731,7 +851,7 @@ fn loader_cell(agent: &Agent) -> Cell {
     }
 }
 
-fn skill_cell(cfg: &Config, agent: &Agent, name: &str) -> Cell {
+fn skill_cell(cfg: &Config, agent: &Agent, name: &str, skills: &[String]) -> Cell {
     if !agent.active() {
         return absent(agent.skills.join(name), State::Absent);
     }
@@ -740,13 +860,7 @@ fn skill_cell(cfg: &Config, agent: &Agent, name: &str) -> Cell {
         SkillsMode::Folder => link_cell(&agent.skills, &cfg.source.skills, &cfg.source.root),
         SkillsMode::PerSkill => {
             if is_link(&agent.skills) {
-                return absent(
-                    agent.skills.clone(),
-                    State::Foreign(format!(
-                        "`{}` is a link, but this agent links skills one by one",
-                        tilde(&agent.skills)
-                    )),
-                );
+                return unfold_cell(cfg, agent, skills);
             }
             link_cell(
                 &agent.skills.join(name),
@@ -754,6 +868,45 @@ fn skill_cell(cfg: &Config, agent: &Agent, name: &str) -> Cell {
                 &cfg.source.root,
             )
         }
+    }
+}
+
+/// A per-skill agent whose skills folder is a link. A link into the canon is
+/// folder-mode wiring this agent no longer wants, so it is swapped for a real
+/// folder of one link per skill, in one change every skill row shares. A link
+/// anywhere else is the user's and stays.
+fn unfold_cell(cfg: &Config, agent: &Agent, skills: &[String]) -> Cell {
+    let at = agent.skills.clone();
+    let dest = link_target(&at).unwrap_or_default();
+    if !dest.starts_with(&cfg.source.root) {
+        return absent(
+            at.clone(),
+            State::Foreign(format!(
+                "`{}` is a link to `{}`, and this agent links skills one by one",
+                tilde(&at),
+                tilde(&dest)
+            )),
+        );
+    }
+    let mut changes = vec![Change::Unlink { at: at.clone() }];
+    changes.extend(skills.iter().map(|name| Change::Link {
+        at: at.join(name),
+        to: cfg.source.skills.join(name),
+    }));
+    Cell {
+        state: State::Broken(format!(
+            "`{}` is a link to the whole folder, but this agent links skills one by one",
+            tilde(&at)
+        )),
+        change: Some(Change::Batch {
+            what: format!(
+                "replace the link {} with a folder holding one link per skill",
+                tilde(&at)
+            ),
+            changes,
+        }),
+        undo: None,
+        at,
     }
 }
 
@@ -775,7 +928,11 @@ fn leftovers(cfg: &Config, agent: &Agent, skills: &[String]) -> (Vec<String>, Ve
         }
         let at = e.path();
         match link_target(&at) {
-            Some(dest) if dest.starts_with(&cfg.source.root) => gone.push(Change::Unlink { at }),
+            // A link into the canon, or one pointing at nothing at all: the
+            // agent lists the skill and finds nothing behind it either way.
+            Some(dest) if dest.starts_with(&cfg.source.root) || !dest.exists() => {
+                gone.push(Change::Unlink { at })
+            }
             _ => other.push(name),
         }
     }
@@ -788,7 +945,7 @@ fn is_link(p: &Path) -> bool {
 }
 
 /// Where a symlink points, made absolute against its own folder.
-fn link_target(at: &Path) -> Option<PathBuf> {
+pub fn link_target(at: &Path) -> Option<PathBuf> {
     let dest = fs::read_link(at).ok()?;
     Some(if dest.is_absolute() {
         dest
@@ -975,7 +1132,7 @@ mod tests {
         let plan = Plan::build(&cfg);
         assert_eq!(cell(&plan, "skill rust").state.word(), "unwired");
         assert!(
-            plan.drifted(),
+            plan.drifted(None),
             "a missing link is drift, which `status` exits 1 on"
         );
 
@@ -988,7 +1145,10 @@ mod tests {
         );
         let plan = Plan::build(&cfg);
         assert_eq!(cell(&plan, "skill rust").state.word(), "linked");
-        assert!(!plan.drifted(), "nothing should be left for `fix` to do");
+        assert!(
+            !plan.drifted(None),
+            "nothing should be left for `fix` to do"
+        );
     }
 
     #[test]
@@ -1091,7 +1251,7 @@ mod tests {
 
         let plan = Plan::build(&cfg);
         assert_eq!(plan.stale.len(), 1, "the link into the canon is stale");
-        assert!(plan.drifted());
+        assert!(plan.drifted(None));
         apply(&plan);
         assert!(
             fs::symlink_metadata(&stale).is_err(),
@@ -1130,6 +1290,51 @@ mod tests {
             .filter(|c| matches!(c, Change::Link { at, .. } if *at == shared))
             .count();
         assert_eq!(links, 1, "two agents reading the same folder need one link");
+    }
+
+    #[test]
+    fn a_move_never_writes_over_what_is_already_there() {
+        let (t, _) = world();
+        let from = t.skill("canon/skills/synced", "synced");
+        let to = t.skill("claude/skills/synced", "synced");
+        for change in [
+            Change::Rename {
+                from: from.clone(),
+                to: to.clone(),
+            },
+            Change::Evict {
+                from: from.clone(),
+                to,
+            },
+        ] {
+            assert!(
+                change.run().is_err(),
+                "the agent's copy is the live one, so nothing is overwritten"
+            );
+        }
+        assert!(
+            from.join("SKILL.md").is_file(),
+            "and what was to move is still there"
+        );
+    }
+
+    #[test]
+    fn a_move_takes_the_whole_folder_with_it() {
+        let (t, _) = world();
+        let from = t.skill("canon/skills/synced", "synced");
+        t.write("canon/skills/synced/run.sh", "echo hi\n");
+        let to = t.at("claude/skills/synced");
+        Change::Rename {
+            from: from.clone(),
+            to: to.clone(),
+        }
+        .run()
+        .expect("it should move");
+        assert!(!from.exists(), "nothing is left behind");
+        assert_eq!(
+            fs::read_to_string(to.join("run.sh")).expect("scripts move with it"),
+            "echo hi\n"
+        );
     }
 
     #[test]

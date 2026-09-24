@@ -178,7 +178,7 @@ pub fn load_from(root: &Path) -> Result<Config> {
     let path = root.join(CONFIG_FILE);
     if !path.exists() {
         bail!(
-            "no `{}` in `{}`: run `canon` to set it up, or set `CANONIZE_SOURCE` to your canon folder",
+            "no `{}` in `{}`: run `canon setup` to set it up around the rules your agents already read, `canon init` to start a new canon, or set `CANONIZE_SOURCE` to the folder yours is in",
             CONFIG_FILE,
             tilde(root)
         );
@@ -319,19 +319,149 @@ pub fn house_files(source: &Source) -> Vec<PathBuf> {
     files
 }
 
-/// The skill folders in the source, sorted by name.
+/// The skills in the source, sorted by name: a folder with a `SKILL.md`, which
+/// is what an agent can load.
 pub fn skill_names(source: &Source) -> Vec<String> {
-    let mut names: Vec<String> = match fs::read_dir(&source.skills) {
+    let mut names: Vec<String> = skill_dirs(source)
+        .into_iter()
+        .filter(|(_, is_skill)| *is_skill)
+        .map(|(name, _)| name)
+        .collect();
+    names.sort();
+    names
+}
+
+/// Folders in the skills folder that are not skills, each with the skills it
+/// holds inside: an agent whose skills folder is the canon's writes its own
+/// tree there (Claude's `synced` bucket), and none of it can be loaded.
+pub fn strays(source: &Source) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = skill_dirs(source)
+        .into_iter()
+        .filter(|(_, is_skill)| !*is_skill)
+        .map(|(name, _)| {
+            let mut inside = Vec::new();
+            skills_inside(&source.skills.join(&name), 3, &mut inside);
+            inside.sort();
+            (name, inside)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Every folder in the skills folder, with whether it is a skill.
+fn skill_dirs(source: &Source) -> Vec<(String, bool)> {
+    match fs::read_dir(&source.skills) {
         Ok(entries) => entries
             .flatten()
             .filter(|e| e.path().is_dir())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|n| !n.starts_with('.'))
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+            .map(|e| {
+                let is_skill = e.path().join("SKILL.md").is_file();
+                (e.file_name().to_string_lossy().into_owned(), is_skill)
+            })
             .collect(),
         Err(_) => Vec::new(),
+    }
+}
+
+/// The names of the skills anywhere under `dir`, down to `depth` folders.
+fn skills_inside(dir: &Path, depth: usize, out: &mut Vec<String>) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
     };
-    names.sort();
-    names
+    for e in entries.flatten().filter(|e| e.path().is_dir()) {
+        let path = e.path();
+        if path.join("SKILL.md").is_file() {
+            out.push(e.file_name().to_string_lossy().into_owned());
+        } else {
+            skills_inside(&path, depth - 1, out);
+        }
+    }
+}
+
+/// Set one key in `canonize.toml` by rewriting its own line, so every comment
+/// the file carries survives. Returns the line as it now reads, and leaves the
+/// file exactly as it was when the result would not load.
+pub fn set_key(path: &Path, key: &str, literal: &str, dry_run: bool) -> Result<String> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("could not read `{}`", tilde(path)))?;
+    let (section, leaf) = match key.rsplit_once('.') {
+        Some((section, leaf)) => (Some(section), leaf),
+        None => (None, key),
+    };
+    if leaf.is_empty() || leaf.contains(char::is_whitespace) {
+        bail!(
+            "`{key}` is not a key: write it as `projects`, `source.rules` or `agents.pi.skills_mode`"
+        );
+    }
+
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let mut here: Option<String> = None;
+    let mut found = None;
+    let mut section_at = None;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(name) = trimmed.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+            here = Some(name.to_string());
+            if Some(name) == section {
+                section_at = Some(i);
+            }
+            continue;
+        }
+        if here.as_deref() == section
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(name, _)| name.trim() == leaf)
+        {
+            found = Some(i);
+            break;
+        }
+    }
+
+    // The line, keeping the padding the file already uses around `=`.
+    let line = match found {
+        Some(i) => {
+            let head = lines[i]
+                .split_once('=')
+                .map_or(leaf.to_string(), |(h, _)| h.to_string());
+            format!("{head}= {literal}")
+        }
+        None => format!("{leaf} = {literal}"),
+    };
+    match (found, section_at, section) {
+        (Some(i), _, _) => lines[i] = line.clone(),
+        (None, Some(at), _) => lines.insert(at + 1, line.clone()),
+        (None, None, Some(section)) => {
+            if !lines.last().is_some_and(|l| l.trim().is_empty()) {
+                lines.push(String::new());
+            }
+            lines.push(format!("[{section}]"));
+            lines.push(line.clone());
+        }
+        (None, None, None) => lines.push(line.clone()),
+    }
+
+    if dry_run {
+        return Ok(line);
+    }
+    let mut body = lines.join("\n");
+    body.push('\n');
+    fs::write(path, &body).with_context(|| format!("could not write `{}`", tilde(path)))?;
+    // A config that no longer loads is worse than the setting being unset, so
+    // the file goes back exactly as it was and the parser's words are the error.
+    let root = path.parent().unwrap_or(Path::new("."));
+    if let Err(e) = load_from(root) {
+        fs::write(path, &text).with_context(|| format!("could not write `{}`", tilde(path)))?;
+        bail!("`{key} = {literal}` was not kept, since the config then reads: {e:#}");
+    }
+    Ok(line)
 }
 
 #[cfg(test)]
@@ -447,6 +577,101 @@ mod tests {
         assert!(
             load_from(t.path()).is_err(),
             "a misspelled key must be an error, or it silently does nothing"
+        );
+    }
+
+    /// The config as `canon init` writes it: every setting, each with a comment.
+    fn written_config(t: &Temp) -> PathBuf {
+        t.write(
+            CONFIG_FILE,
+            &crate::init::config_text(
+                "[]",
+                "rules.yaml",
+                "rules.schema.json",
+                "house/*.md",
+                "skills",
+            ),
+        )
+    }
+
+    #[test]
+    fn a_setting_is_written_on_its_own_line_and_every_comment_stays() {
+        let t = Temp::new();
+        let path = written_config(&t);
+        let before = fs::read_to_string(&path).expect("it should be there");
+        let comments = before
+            .lines()
+            .filter(|l| l.trim_start().starts_with('#'))
+            .count();
+
+        set_key(&path, "source.rules", "\"MYRULES.md\"", false).expect("it should write");
+        let after = fs::read_to_string(&path).expect("it should be there");
+        assert_eq!(
+            after
+                .lines()
+                .filter(|l| l.trim_start().starts_with('#'))
+                .count(),
+            comments,
+            "the file explains itself, so its comments outlive any setting"
+        );
+        let cfg = load_from(t.path()).expect("it should still load");
+        assert_eq!(cfg.source.rules, cfg.source.root.join("MYRULES.md"));
+        assert_eq!(
+            after
+                .lines()
+                .filter(|l| l.trim_start().starts_with("rules"))
+                .count(),
+            1,
+            "the setting is rewritten, never added beside itself"
+        );
+    }
+
+    #[test]
+    fn a_setting_with_no_line_yet_is_added_under_its_section() {
+        let t = Temp::new();
+        let path = written_config(&t);
+        set_key(&path, "agents.pi.skills_mode", "\"per-skill\"", false).expect("a new section");
+        set_key(&path, "agents.pi.rules_mode", "\"import\"", false).expect("a new line in it");
+
+        let cfg = load_from(t.path()).expect("it should load");
+        let pi = cfg
+            .agents
+            .iter()
+            .find(|a| a.name == "pi")
+            .expect("pi is known");
+        assert_eq!(pi.skills_mode, SkillsMode::PerSkill);
+        assert_eq!(pi.rules_mode, RulesMode::Import);
+    }
+
+    #[test]
+    fn a_setting_that_would_not_load_leaves_the_file_exactly_as_it_was() {
+        let t = Temp::new();
+        let path = written_config(&t);
+        let before = fs::read_to_string(&path).expect("it should be there");
+
+        let err = set_key(&path, "agents.pi.skills_mode", "\"per-skil\"", false)
+            .expect_err("`per-skil` is not a mode");
+        assert!(
+            format!("{err:#}").contains("per-skill"),
+            "the parser's own words say what is allowed: {err:#}"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("it should be there"),
+            before,
+            "a config that no longer loads is worse than the setting being unset"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_writes_nothing() {
+        let t = Temp::new();
+        let path = written_config(&t);
+        let before = fs::read_to_string(&path).expect("it should be there");
+        let line = set_key(&path, "projects", "[\"~/dev\"]", true).expect("it should plan");
+        assert!(line.contains("~/dev"), "{line}");
+        assert_eq!(
+            fs::read_to_string(&path).expect("it should be there"),
+            before
         );
     }
 
