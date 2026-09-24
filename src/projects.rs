@@ -321,15 +321,20 @@ fn wiring(root: &Path) -> Vec<Wire> {
     let what = format!("{CANON_FILE} kept out of git");
     let ignore = root.join(".gitignore");
     if root.join(".git").exists() {
-        let ignored = std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["check-ignore", "-q", CANON_FILE])
-            .status()
-            .is_ok_and(|s| s.success());
-        // Only a line canonize could have written itself is taken back.
-        let ours =
+        let listed =
             fs::read_to_string(&ignore).is_ok_and(|t| t.lines().any(|l| l.trim() == CANON_FILE));
+        // `check-ignore` reads the index too, so a CANON.md somebody committed
+        // is reported as not ignored however many times the line is there.
+        let ignored = listed
+            || std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["check-ignore", "-q", CANON_FILE])
+                .status()
+                .is_ok_and(|s| s.success());
+        // The line goes back only along with the CANON.md it was added for:
+        // without one, the line is the user's, whoever typed it.
+        let ours = listed && root.join(CANON_FILE).is_file();
         out.push(Wire {
             what,
             state: if ignored {

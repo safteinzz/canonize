@@ -6,7 +6,7 @@
 //! link pointing anywhere else, is reported as foreign and left alone.
 
 use crate::config::{self, Agent, Config, RulesMode, SkillsMode, tilde};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -381,7 +381,7 @@ impl Change {
             }
             Change::Unlink { at } => remove_link(at),
             Change::AppendLine { file, line } => {
-                let mut text = fs::read_to_string(file).unwrap_or_default();
+                let mut text = read_text(file)?.unwrap_or_default();
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n');
                 }
@@ -431,12 +431,26 @@ impl Change {
                     fs::create_dir_all(parent)
                         .with_context(|| format!("could not create `{}`", tilde(parent)))?;
                 }
-                fs::rename(from, to).with_context(|| {
-                    format!(
-                        "could not move `{}` to `{}` (a different disk needs a manual move)",
-                        tilde(from),
-                        tilde(to)
-                    )
+                fs::rename(from, to).map_err(|e| {
+                    // `rename` says 18 for another filesystem and 22 for a
+                    // folder moved inside itself; anything else keeps the
+                    // system's words without its number.
+                    let why = match e.raw_os_error() {
+                        Some(18) => {
+                            "they are on different disks, so copy it there and run this again"
+                                .to_string()
+                        }
+                        Some(22) => {
+                            "the new path is inside the old one, so name one outside it".to_string()
+                        }
+                        _ => e
+                            .to_string()
+                            .split(" (os error")
+                            .next()
+                            .unwrap_or("it failed")
+                            .to_string(),
+                    };
+                    anyhow!("could not move `{}` to `{}`: {why}", tilde(from), tilde(to))
                 })
             }
             Change::AddImport { file, line } if is_canon_file(file) => append_import(file, line),
@@ -449,7 +463,7 @@ impl Change {
                 )
             }
             Change::AddImport { file, line } => {
-                let old = fs::read_to_string(file).unwrap_or_default();
+                let old = read_text(file)?.unwrap_or_default();
                 if let Some(parent) = file.parent() {
                     fs::create_dir_all(parent)
                         .with_context(|| format!("could not create `{}`", tilde(parent)))?;
@@ -494,8 +508,34 @@ fn is_canon_file(file: &Path) -> bool {
 }
 
 /// Add an import at the end of a file, starting a CANON.md with its header.
+/// A file's text, or nothing when it is not there. A file that is not UTF-8 is
+/// an error rather than an empty string, because writing an empty string back
+/// would replace everything in it.
+fn read_text(file: &Path) -> Result<Option<String>> {
+    match fs::read(file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("could not read `{}`", tilde(file))),
+        Ok(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => Ok(Some(text)),
+            Err(_) => bail!("{}", not_text(file)),
+        },
+    }
+}
+
+/// Why canonize will not write an import into a file, which `advice` answers
+/// with what to do about it.
+pub const NOT_UTF8: &str = "not valid UTF-8, so an import would lose what is in it";
+
+/// What the user is told about a file canonize will not write into.
+fn not_text(file: &Path) -> String {
+    format!(
+        "`{}` is not valid UTF-8, so it was left alone: canonize would have to replace what is in it",
+        tilde(file)
+    )
+}
+
 fn append_import(file: &Path, line: &str) -> Result<()> {
-    let mut text = fs::read_to_string(file).unwrap_or_default();
+    let mut text = read_text(file)?.unwrap_or_default();
     if text.is_empty() && is_canon_file(file) {
         text.push_str(CANON_HEADER);
     }
@@ -623,9 +663,12 @@ impl Plan {
                 cells[first_skill + i].push(skill_cell(cfg, agent, name, &skills));
             }
             let (other, gone) = leftovers(cfg, agent, &skills);
-            let (own, rest): (Vec<String>, Vec<String>) = other
-                .into_iter()
-                .partition(|n| agent.skills.join(n).join("SKILL.md").is_file());
+            // A link is never the agent's own skill, whatever it points at:
+            // adopting means moving the folder, and the folder is elsewhere.
+            let (own, rest): (Vec<String>, Vec<String>) = other.into_iter().partition(|n| {
+                let at = agent.skills.join(n);
+                !is_link(&at) && at.join("SKILL.md").is_file()
+            });
             owns.push(own);
             foreign.push(rest);
             stale.extend(gone.into_iter().map(|c| (a, c)));
@@ -1016,6 +1059,23 @@ fn link_cell(at: &Path, to: &Path, root: &Path) -> Cell {
     }
 }
 
+/// Whether an `@path` line names this file, however the path is spelled: with
+/// `~`, in full, or through a link such as `~/.config/canonize`.
+fn names_file(line: &str, file: &Path) -> bool {
+    let Some(p) = line
+        .strip_prefix('@')
+        .filter(|p| !p.is_empty() && !p.contains(' '))
+    else {
+        return false;
+    };
+    let p = config::expand(p);
+    p == *file
+        || match (fs::canonicalize(&p), fs::canonicalize(file)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+}
+
 /// `file` should carry an `@path` line naming `rules`.
 fn import_cell(file: &Path, rules: &Path, root: &Path) -> Cell {
     let line = format!("@{}", tilde(rules));
@@ -1048,14 +1108,22 @@ fn import_cell(file: &Path, rules: &Path, root: &Path) -> Cell {
             );
         }
     }
-    let Ok(text) = fs::read_to_string(file) else {
-        return cell(State::Missing, add, None);
+    let text = match read_text(file) {
+        Ok(Some(text)) => text,
+        Ok(None) => return cell(State::Missing, add, None),
+        // Writing the import would mean replacing everything in it.
+        Err(_) => {
+            return cell(State::Foreign(NOT_UTF8.into()), None, None);
+        }
     };
-    let remove = Some(Change::RemoveImport {
-        file: file.to_path_buf(),
-        line: line.clone(),
-    });
-    if text.lines().any(|l| l.trim() == line) {
+    // However the line spells the path, it is the import: an absolute one, or
+    // one reached through a link such as `~/.config/canonize`, already makes
+    // the agent read the rules, and adding ours beside it would load them twice.
+    if let Some(found) = text.lines().map(str::trim).find(|l| names_file(l, rules)) {
+        let remove = Some(Change::RemoveImport {
+            file: file.to_path_buf(),
+            line: found.to_string(),
+        });
         return if rules.exists() {
             cell(State::Linked, None, remove)
         } else {

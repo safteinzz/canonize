@@ -24,9 +24,12 @@ pub fn config_text(projects: &str, rules: &str, schema: &str, house: &str, skill
 const DIRS: [&str; 2] = ["house", "skills"];
 
 /// Create what is missing and report each path with whether it was created.
-/// An existing file is never overwritten, so running it twice is harmless.
-pub fn run(root: &Path) -> Result<Vec<(String, bool)>> {
-    fs::create_dir_all(root).with_context(|| format!("could not create `{}`", tilde(root)))?;
+/// An existing file is never overwritten, so running it twice is harmless. A
+/// dry run reports the same list and writes nothing.
+pub fn run(root: &Path, dry_run: bool) -> Result<Vec<(String, bool)>> {
+    if !dry_run {
+        fs::create_dir_all(root).with_context(|| format!("could not create `{}`", tilde(root)))?;
+    }
     let mut done = Vec::new();
     let config = config_text(
         "[]",
@@ -39,7 +42,7 @@ pub fn run(root: &Path) -> Result<Vec<(String, bool)>> {
     for (name, body) in files {
         let path = root.join(name);
         let created = !path.exists();
-        if created {
+        if created && !dry_run {
             fs::write(&path, body)
                 .with_context(|| format!("could not write `{}`", tilde(&path)))?;
         }
@@ -48,8 +51,10 @@ pub fn run(root: &Path) -> Result<Vec<(String, bool)>> {
     for name in DIRS {
         let path = root.join(name);
         let created = !path.exists();
-        fs::create_dir_all(&path)
-            .with_context(|| format!("could not create `{}`", tilde(&path)))?;
+        if !dry_run {
+            fs::create_dir_all(&path)
+                .with_context(|| format!("could not create `{}`", tilde(&path)))?;
+        }
         done.push((format!("{}/", tilde(&path)), created));
     }
     Ok(done)

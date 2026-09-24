@@ -69,7 +69,7 @@ canon adopt --all             # every skill every agent keeps itself
 canon adopt --all -n          # print what that would move, move nothing
 ```
 
-Enter works like in the projects tab: it links a missing skill, unlinks a linked one, or adopts an `own` one; `a` and `d` open a choice of this cell, every skill for this agent, or this skill for every agent. A skill an agent keeps itself shows as `own` in that agent's column. Adopting it moves the whole folder, SKILL.md and scripts, into your canon and leaves a link in its place, so the agent sees no difference. `F` never adopts: moving your files is always one at a time. `d` on an `own` skill also offers to delete the folder itself, behind a red box that only unlocks once you type the skill's name, because nothing else has a copy. Folders without a SKILL.md, like the one Claude fills with the skills it syncs, are not skills and get no row, wherever they sit: one inside your canon is named by `canon validate` for what it is, with the skills it holds (`skills/synced: not a skill but a folder holding 2 (docx, pptx)`).
+Enter works like in the projects tab: it links a missing skill, unlinks a linked one, or adopts an `own` one; `a` and `d` open a choice of this cell, every skill for this agent, or this skill for every agent. A skill an agent keeps itself shows as `own` in that agent's column. Adopting it moves the whole folder, SKILL.md and scripts, into your canon and leaves a link in its place, so the agent sees no difference. `F` never adopts: moving your files is always one at a time. `d` on an `own` skill also offers to delete the folder itself, and `d` on a skill of your own canon offers to delete that, every agent's link to it included; both sit behind a red box that only unlocks once you type the skill's name, because nothing else has a copy. Folders without a SKILL.md, like the one Claude fills with the skills it syncs, are not skills and get no row, wherever they sit: one inside your canon is named by `canon validate` for what it is, with the skills it holds (`skills/synced: not a skill but a folder holding 2 (docx, pptx)`).
 
 ## See which project imports which house file
 
@@ -135,16 +135,12 @@ canon validate [--json]                      # validate the rules file and the s
 canon setup [-n] [--root DIR] [--rules NAME] # set up, wizard or flags
 canon adopt [AGENT] [SKILL] [--all] [-n]     # move an agent's own skill into the source
 canon move <WHAT> <TO> [-n]                  # move your canon, or something in it
-canon evict [NAME] <AGENT> [--all] [-n]      # move what is not a skill back to an agent
+canon evict [NAME] [AGENT] [--all] [-n]      # move what is not a skill back to an agent
 canon config set <KEY> <VALUE>... [-n]       # change a setting, comments and all
-canon init [DIR]                             # lay out a new source
+canon init [DIR] [-n]                        # lay out a new source
 ```
 
 `-a` limits a command to one agent; `canon <command> --help` has the details.
-
-## Drive it from a script, or from an agent
-
-Nothing in the CLI ever prompts, so an agent can do the whole job: `canon setup`, then `canon status --json` to see what is wrong, `canon fix` to wire it, `canon adopt --all` to bring in what the agents kept to themselves, and `canon status --strict` to be sure nothing is left. `--json` on `status` and `validate` prints absolute paths and these state names, which do not change with the wording of the tables: `linked`, `unwired`, `broken`, `foreign`, `own`, `na`, `off`, `absent`. Each entry under `unsettled` carries the advice that `canon status` prints for it.
 
 ## Keys
 
@@ -161,6 +157,10 @@ Nothing in the CLI ever prompts, so an agent can do the whole job: `canon setup`
 | `q` `Esc` `Ctrl-c` | quit |
 
 Each tab's own keys are on its bottom bar, and `?` lists them all.
+
+## Driving it from a script
+
+Nothing in the CLI ever prompts, so an agent can do the whole job: `canon setup`, then `canon status --json` to see what is wrong, `canon fix` to wire it, `canon adopt --all` to bring in what the agents kept to themselves, and `canon status --strict` to be sure nothing is left. `--json` on `status` and `validate` prints absolute paths and these state names, which do not change with the wording of the tables: `linked`, `unwired`, `broken`, `foreign`, `own`, `na`, `off`, `absent`. Each entry under `unsettled` carries the advice that `canon status` prints for it.
 
 ## Where it keeps things
 

@@ -502,14 +502,11 @@ impl App {
     /// Every agent's setup canonize made (rules, CANON.md loader), behind one red gate.
     fn remove_agents_all(&mut self) {
         let Some(plan) = &self.plan else { return };
-        let mut changes: Vec<Change> = Vec::new();
-        for r in plan.setup_rows() {
-            for u in plan.cells[r].iter().filter_map(|c| c.undo.clone()) {
-                if !changes.contains(&u) {
-                    changes.push(u);
-                }
-            }
-        }
+        let changes: Vec<Change> = plan::dedup(
+            plan.setup_rows()
+                .into_iter()
+                .flat_map(|r| plan.cells[r].iter().filter_map(|c| c.undo.clone())),
+        );
         if changes.is_empty() {
             self.set_status("canonize has wired no agent's setup");
             return;
@@ -823,17 +820,12 @@ impl App {
     /// Every skill link canonize made, for every agent, behind one red gate.
     fn remove_skills_all(&mut self) {
         let Some(plan) = &self.plan else { return };
-        let mut changes: Vec<Change> = Vec::new();
-        for r in plan.skill_rows() {
-            for c in &plan.cells[r] {
-                if let Some(u) = &c.undo
-                    && !matches!(u, Change::DeleteDir { .. })
-                    && !changes.contains(u)
-                {
-                    changes.push(u.clone());
-                }
-            }
-        }
+        let changes: Vec<Change> = plan::dedup(
+            plan.skill_rows()
+                .into_iter()
+                .flat_map(|r| plan.cells[r].iter().filter_map(|c| c.undo.clone()))
+                .filter(|u| !matches!(u, Change::DeleteDir { .. })),
+        );
         if changes.is_empty() {
             self.set_status("canonize made no skill links");
             return;

@@ -74,6 +74,9 @@ pub struct Config {
     pub projects: Vec<PathBuf>,
     /// The file the config was read from, or where it would be.
     pub path: PathBuf,
+    /// The folder `canon` looks in, which is a link to the source when the
+    /// source lives somewhere else.
+    pub shortcut: PathBuf,
 }
 
 #[derive(Deserialize, Default)]
@@ -260,6 +263,7 @@ fn build(root: &Path, raw: RawConfig, path: PathBuf) -> Result<Config> {
         agents,
         projects: raw.projects.iter().map(|p| expand(p)).collect(),
         path,
+        shortcut: source_dir(),
     })
 }
 

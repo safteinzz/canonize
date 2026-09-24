@@ -67,7 +67,8 @@ script, with those state names (`na`, `absent`) and absolute paths. `fix` never
 settles a foreign or own cell, so `status` ends by naming them and what to do,
 and what `validate` reports is yours to edit. Every command that changes
 something takes `-n` (`--dry-run`), a dry run printing the very lines the real
-run would, and writing nothing. Errors go to stderr, exit non-zero.
+run would, and writing nothing; `self update` is the exception, since all it
+changes is canonize itself. Errors go to stderr, exit non-zero.
 Run `canon <command> --help` for a command's details.",
     "\n\n",
     env!("CARGO_PKG_REPOSITORY"),
@@ -134,7 +135,7 @@ enum Cmd {
     ///   -n        dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Adopt(cli::AdoptArgs),
-    /// Move a folder that is not a skill out of your canon, back to one agent  [NAME] <AGENT>
+    /// Move a folder that is not a skill out of your canon, back to one agent  [NAME] [AGENT]
     ///   --all     every folder in your canon that is not a skill
     ///   --drop    delete your canon's copy, when the agent already has one
     ///   -n        dry run: print what would change and change nothing
@@ -143,7 +144,6 @@ enum Cmd {
     /// Move your canon, or something in it, and repoint every import and link  <WHAT> <TO>
     ///   canon move canon ~/dotfiles/canon        the whole folder, agents repointed
     ///   canon move HOUSE-WSL.md house            a file inside it, into house/
-    ///   canon move ~/old/canon ~/dotfiles/canon  one already moved: repoint only
     #[command(verbatim_doc_comment)]
     Move(cli::MoveArgs),
     /// Change a setting in canonize.toml, comments and all
@@ -152,6 +152,8 @@ enum Cmd {
     #[command(verbatim_doc_comment, subcommand)]
     Config(cli::ConfigCmd),
     /// Lay out a new canon folder: canonize.toml, rules.yaml, its schema, house/, skills/  [DIR]
+    ///   -n        dry run: print what would change and change nothing
+    #[command(verbatim_doc_comment)]
     Init(cli::InitArgs),
     /// Manage canonize itself: `self update` reinstalls, `self check` looks for a newer release
     #[command(name = "self", subcommand)]

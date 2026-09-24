@@ -85,11 +85,10 @@ pub struct AdoptArgs {
 
 #[derive(clap::Args)]
 pub struct EvictArgs {
-    /// The folder in your canon's skills folder that is not a skill
-    #[arg(required_unless_present = "all")]
+    /// The folder in your canon's skills folder that is not a skill (left out with `--all`)
     pub name: Option<String>,
     /// The agent to move it to, which keeps it in its own skills folder
-    pub agent: String,
+    pub agent: Option<String>,
     /// Every folder in your canon that is not a skill
     #[arg(long)]
     pub all: bool,
@@ -137,6 +136,9 @@ pub struct ConfigSetArgs {
 pub struct InitArgs {
     /// Folder to lay out (default: `$CANONIZE_SOURCE`, else your config folder)
     pub dir: Option<PathBuf>,
+    /// Dry run: print what would change and change nothing
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
 }
 
 /// The index of `--agent`, or an error naming the ones that exist.
@@ -225,6 +227,9 @@ pub fn status(args: AgentArgs) -> Result<i32> {
 
     let mut notes = Vec::new();
     for &i in &cols {
+        // Where this agent's notes start, so a reason shared with another agent
+        // is still said about this one.
+        let mine = notes.len();
         let a = &cfg.agents[i];
         if !a.installed() {
             notes.push(format!("{}: not installed (no {})", a.name, tilde(&a.home)));
@@ -245,7 +250,7 @@ pub fn status(args: AgentArgs) -> Result<i32> {
         for (label, why) in &broken {
             let shared = broken.iter().filter(|(_, other)| other == why).count() > 1;
             if shared {
-                if !notes.iter().any(|n| n.ends_with(why.as_str())) {
+                if !notes[mine..].iter().any(|n| n.ends_with(why.as_str())) {
                     notes.push(format!("{}: {why}", a.name));
                 }
             } else {
@@ -254,7 +259,7 @@ pub fn status(args: AgentArgs) -> Result<i32> {
         }
         if !plan.foreign[i].is_empty() {
             notes.push(format!(
-                "{} keeps these in its skills folder and canonize leaves them alone, since they hold no SKILL.md: {}",
+                "{} keeps these in its skills folder and canonize leaves them alone: {}",
                 a.name,
                 plan.foreign[i].join(", ")
             ));
@@ -324,6 +329,9 @@ fn advice(cfg: &Config, plan: &Plan, r: usize, a: usize) -> String {
             agent.name,
             config::CONFIG_FILE
         ),
+        (_, State::Foreign(why)) if why == plan::NOT_UTF8 => {
+            format!("{why}: save it as UTF-8, then run `canon fix`")
+        }
         (_, State::Foreign(why)) => {
             format!("{why}: move it aside yourself, then run `canon fix`")
         }
@@ -551,7 +559,9 @@ fn print_projects(cfg: &Config, p: &Projects, notes: &mut Vec<String>) {
 
 fn run_changes(changes: Vec<Change>, dry_run: bool, nothing: &str) -> i32 {
     if changes.is_empty() {
-        out!("{}", nothing.dimmed());
+        if !nothing.is_empty() {
+            out!("{}", nothing.dimmed());
+        }
         return 0;
     }
     let mut failed = 0;
@@ -637,7 +647,18 @@ pub fn validate(args: JsonArgs) -> Result<i32> {
 /// wrote it there.
 pub fn evict(args: EvictArgs) -> Result<i32> {
     let cfg = config::load()?;
-    let i = pick(&cfg, &Some(args.agent.clone()))?.unwrap_or(0);
+    // With `--all` the one word typed is the agent, so `canon evict --all pi`
+    // is not read as a folder called `pi` with no agent to move it to.
+    let (name, agent_name) = match (&args.name, &args.agent, args.all) {
+        (Some(_), Some(_), true) => bail!("`--all` takes every folder, so it takes no name"),
+        (Some(a), None, true) => (None, a.clone()),
+        (Some(n), Some(a), false) => (Some(n.clone()), a.clone()),
+        (Some(_), None, false) => {
+            bail!("name the agent to move it to, as in `canon evict NAME pi`")
+        }
+        (None, _, _) => bail!("name the agent to move it to, as in `canon evict --all pi`"),
+    };
+    let i = pick(&cfg, &Some(agent_name))?.unwrap_or(0);
     let agent = &cfg.agents[i];
     if agent.skills.as_os_str().is_empty() {
         bail!("`{}` has no skills folder to move it to", agent.name);
@@ -654,7 +675,7 @@ pub fn evict(args: EvictArgs) -> Result<i32> {
         );
     }
     let strays = config::strays(&cfg.source);
-    let names: Vec<String> = match &args.name {
+    let names: Vec<String> = match &name {
         Some(name) => {
             if !strays.iter().any(|(n, _)| n == name) {
                 bail!(
@@ -764,6 +785,13 @@ fn plan_move(
     if from == to {
         bail!("`{}` is where it already is", tilde(from));
     }
+    if to.starts_with(from) {
+        bail!(
+            "`{}` is inside `{}`, so nothing was moved: name a folder outside it",
+            tilde(to),
+            tilde(from)
+        );
+    }
     let there = fs::symlink_metadata(from).is_ok();
     let landed = fs::symlink_metadata(to).is_ok();
     if there && landed {
@@ -818,6 +846,7 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
     files.sort();
     files.dedup();
 
+    let root_after = after(&cfg.source.root);
     let mut out = Vec::new();
     for file in files {
         // Writing through a link would edit the file it points at, which is
@@ -831,16 +860,7 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
         let is_config = file == cfg.path;
         for line in text.lines().map(str::trim) {
             let new = if is_config {
-                // A setting spelling a path out, such as `skills = "~/…"`.
-                line.split_once('=')
-                    .map(|(_, value)| config::expand(value.trim().trim_matches(['"', '\''])))
-                    .and_then(|p| under(&p))
-                    .map(|p| {
-                        line.replace(
-                            &line[line.find('"').unwrap_or(0)..],
-                            &format!("\"{}\"", tilde(&p)),
-                        )
-                    })
+                setting(line, &cfg.source.root, &root_after, &under)
             } else {
                 line.strip_prefix('@')
                     .filter(|p| !p.is_empty() && !p.contains(' '))
@@ -860,7 +880,7 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
 
     // Links: an agent's rules file or skills folder, what is inside a skills
     // folder, and the shortcut `canon` finds the canon by.
-    let mut links: Vec<PathBuf> = vec![config::source_dir()];
+    let mut links: Vec<PathBuf> = vec![cfg.shortcut.clone()];
     for a in cfg.agents.iter().filter(|a| a.active()) {
         links.push(a.rules.clone());
         links.push(a.skills.clone());
@@ -882,6 +902,50 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
         }
     }
     out
+}
+
+/// A `canonize.toml` line rewritten for the move, or nothing when it names
+/// something else. The value is read from between its quotes, so an inline
+/// comment after it is left exactly where it was, and a value written relative
+/// to the canon stays relative.
+fn setting(
+    line: &str,
+    root: &std::path::Path,
+    root_after: &std::path::Path,
+    under: &impl Fn(&std::path::Path) -> Option<PathBuf>,
+) -> Option<String> {
+    let eq = line.find('=')?;
+    let quote = line[eq..].find(['"', '\''])? + eq;
+    let mark = line.as_bytes()[quote] as char;
+    let close = line[quote + 1..].find(mark)? + quote + 1;
+    let value = &line[quote + 1..close];
+    if value.is_empty() {
+        return None;
+    }
+    let relative = !value.starts_with('~') && !value.starts_with('/');
+    let now = if relative {
+        root.join(value)
+    } else {
+        config::expand(value)
+    };
+    let landed = under(&now)?;
+    let written = if relative {
+        // A pattern such as `house/*.md` keeps naming the canon it sits in.
+        landed
+            .strip_prefix(root_after)
+            .ok()?
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        tilde(&landed)
+    };
+    (written != value).then(|| {
+        format!(
+            "{}{mark}{written}{mark}{}",
+            &line[..quote],
+            &line[close + 1..]
+        )
+    })
 }
 
 pub fn config(cmd: ConfigCmd) -> Result<i32> {
@@ -938,11 +1002,11 @@ pub fn init(args: InitArgs) -> Result<i32> {
         Some(d) => config::expand(&d.to_string_lossy()),
         None => config::source_dir(),
     };
-    for (path, created) in init::run(&root)? {
-        if created {
-            out!("{} {path}", "created".green());
-        } else {
-            out!("{} {path}", "exists ".dimmed());
+    for (path, created) in init::run(&root, args.dry_run)? {
+        match (created, args.dry_run) {
+            (true, true) => out!("would create {path}"),
+            (true, false) => out!("{} {path}", "created".green()),
+            (false, _) => out!("{} {path}", "exists ".dimmed()),
         }
     }
     if root != config::source_dir() {
