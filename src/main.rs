@@ -3,8 +3,9 @@
 //! This file is the clap `Cmd` enum and the dispatch match; what you can run is
 //! `canon --help`, which renders from the manifest, those doc comments and
 //! `AFTER`. `config` finds the source and the agents, `plan` compares what each
-//! agent has with what it should have, `check` validates the canon itself,
-//! `cli` prints those for scripts and `tui` shows them to people.
+//! agent has with what it should have, `houses` which agent reads which house
+//! file everywhere, `check` validates the canon itself, `cli` prints those for
+//! scripts and `tui` shows them to people.
 
 /// `println!` for command output. A reader that goes away early (`| head`) is
 /// a normal end for a command whose output is data, not a panic.
@@ -26,6 +27,7 @@ macro_rules! out {
 mod check;
 mod cli;
 mod config;
+mod houses;
 mod init;
 mod plan;
 mod projects;
@@ -48,7 +50,8 @@ const WAYS: &str = "\x1b[1mWays to run it (not subcommands):\x1b[0m
 const AFTER: &str = concat!(
     "\
 \x1b[1mWhat a cell says:\x1b[0m
-  linked, imported  wired to your canon; a project's house import reads `imported`
+  linked, imported  wired to your canon; a house file's import reads `imported`
+  none              a house file not wired there (`-` in the tables): not drift
   unwired           `fix` wires it        broken  wired to the wrong thing, `fix` repoints it
   own               only that agent has it, `adopt` takes it into your canon
   foreign           yours or the agent's, left alone     n/a, off, -  cannot, off, not installed
@@ -58,6 +61,12 @@ const AFTER: &str = concat!(
   canonize and kept out of git. Claude loads it from one `@CANON.md` line in the
   project's CLAUDE.md, pi from an extension and opencode from a setting, both
   wired by `fix`. Codex cannot load another file, so it gets no house files.
+
+\x1b[1mHouses:\x1b[0m
+  A house file an agent reads in every repo: an `@` line in Claude's CLAUDE.md,
+  one in pi's own ~/.pi/agent/CANON.md, or a path in opencode's `instructions`.
+  `fix` repoints and `delete` takes back; adding one is in the TUI's Houses tab,
+  whose rows are every agent (for every repo), then every project.
 
 Your canon is `$CANONIZE_SOURCE`, else your config folder (~/.config/canonize,
 and ~/Library/Application Support/canonize on macOS), and holds canonize.toml.

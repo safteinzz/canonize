@@ -2,14 +2,20 @@
 //! the status line, and every box on top.
 
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table, Tabs, Wrap};
+use std::cell::Cell as Kept;
+
+use ratatui::widgets::{
+    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
+    TableState, Tabs, Wrap,
+};
 
 use super::alert::render_note;
 use super::confirm::render_confirm;
 use super::scope::render_scope;
 use super::typed::render_typed;
+use super::widgets::wrapped_line_count;
 use super::wizard::render_wizard;
-use super::{App, View};
+use super::{App, HouseRow, View};
 use crate::config::{RulesMode, SkillsMode, tilde};
 use crate::plan::{self, State};
 use crate::projects;
@@ -19,19 +25,25 @@ const HINTS: &str =
 const CARD_HINTS: &str = "j/k line · ↵ f fix · d delete · esc back to the list · ? help";
 const SKILL_HINTS: &str =
     "↵ toggle · a link… · d delete… · F link all · D delete all links · ? help";
-/// `{file}` is the selected project's instruction file, `CLAUDE.md` or `AGENTS.md`.
-const PROJECT_HINTS: &str =
-    "↵ toggle · a add… · d delete… · F fix imports · D delete all · o open {file} · ? help";
+/// `{open}` is ` · o open <file>` for the row's file, or nothing when it has none.
+const HOUSE_HINTS: &str =
+    "↵ toggle · a add… · d delete… · F fix broken · D delete all{open} · ? help";
 
 pub(super) fn ui(f: &mut Frame, app: &App) {
     let area = f.area();
+    let pane = detail_pane(app, area.width);
     let chunks = Layout::vertical([
         Constraint::Length(3),
-        Constraint::Min(3),
-        Constraint::Length(11),
+        // Three rows of a grid under its header, taken from the detail pane
+        // on a short screen, so the selection is never scrolled out of sight.
+        Constraint::Min(7),
+        Constraint::Length(pane.as_ref().map_or(0, |(_, h)| *h)),
         Constraint::Length(1),
     ])
     .split(area);
+    if let Some((p, _)) = pane {
+        p.render(f, chunks[2]);
+    }
 
     render_source(f, chunks[0], app);
     match &app.load_error {
@@ -53,18 +65,9 @@ pub(super) fn ui(f: &mut Frame, app: &App) {
                 .wrap(Wrap { trim: false });
             f.render_widget(para, chunks[1]);
         }
-        None if app.view == View::Projects => {
-            render_projects(f, chunks[1], app);
-            render_project_detail(f, chunks[2], app);
-        }
-        None if app.view == View::Skills => {
-            render_skills(f, chunks[1], app);
-            render_detail(f, chunks[2], app);
-        }
-        None => {
-            render_agents(f, chunks[1], app);
-            render_detail(f, chunks[2], app);
-        }
+        None if app.view == View::Skills => render_skills(f, chunks[1], app),
+        None if app.view == View::Houses => render_houses(f, chunks[1], app),
+        None => render_agents(f, chunks[1], app),
     }
     render_status(f, chunks[3], app);
 
@@ -124,9 +127,9 @@ fn render_source(f: &mut Frame, area: Rect, app: &App) {
     let idx = match app.view {
         View::Agents => 0,
         View::Skills => 1,
-        View::Projects => 2,
+        View::Houses => 2,
     };
-    let tabs = Tabs::new(vec!["Agents", "Skills", "Projects"])
+    let tabs = Tabs::new(vec!["Agents", "Skills", "Houses"])
         .select(idx)
         .divider("│")
         .highlight_style(
@@ -358,30 +361,132 @@ fn render_skills(f: &mut Frame, area: Rect, app: &App) {
         }
         rows.push(Row::new(cells));
     }
+    let total = rows.len();
     let table = Table::new(rows, widths)
         .header(Row::new(header).bottom_margin(1))
         .block(block);
-    f.render_widget(table, area);
+    render_grid(f, area, table, total, app.srow, &app.stop);
 }
 
-/// The selected cell spelled out: where it lives, how it is wired, and what
-/// `f` or `d` would do to it.
-fn render_detail(f: &mut Frame, area: Rect, app: &App) {
-    let (Some(cfg), Some(plan)) = (&app.cfg, &app.plan) else {
+/// Rows the header of a grid takes: its line and the blank under it.
+const GRID_HEADER_H: u16 = 2;
+
+/// Draws a grid scrolled so the `selected` row is on screen, starting from
+/// `top` and writing back where it ended up, with a scrollbar on the right
+/// border whenever some of the `total` rows are out of sight.
+fn render_grid(
+    f: &mut Frame,
+    area: Rect,
+    table: Table,
+    total: usize,
+    selected: usize,
+    top: &Kept<usize>,
+) {
+    let mut state = TableState::new()
+        .with_offset(top.get())
+        .with_selected(Some(selected));
+    f.render_stateful_widget(table, area, &mut state);
+    top.set(state.offset());
+    let viewport = area.height.saturating_sub(2 + GRID_HEADER_H) as usize;
+    if total <= viewport {
         return;
+    }
+    let mut bar = ScrollbarState::new(total - viewport).position(state.offset());
+    f.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None),
+        Rect {
+            y: area.y + 1 + GRID_HEADER_H,
+            height: viewport as u16,
+            ..area
+        },
+        &mut bar,
+    );
+}
+
+/// A detail pane's title and body, built before the frame is laid out so the
+/// pane can be given exactly the rows it needs.
+struct Pane {
+    title: String,
+    lines: Vec<Line<'static>>,
+}
+
+impl Pane {
+    /// Rows the pane takes at `width` once wrapped, borders included.
+    fn height(&self, width: u16) -> u16 {
+        let inner = width.saturating_sub(2) as usize;
+        let body: usize = self
+            .lines
+            .iter()
+            .map(|l| {
+                let text: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                wrapped_line_count(&text, inner)
+            })
+            .sum();
+        body as u16 + 2
+    }
+
+    fn render(self, f: &mut Frame, area: Rect) {
+        let para = Paragraph::new(self.lines)
+            .block(Block::default().borders(Borders::ALL).title(self.title))
+            .wrap(Wrap { trim: false });
+        f.render_widget(para, area);
+    }
+}
+
+/// The detail pane for the current view: the selected cell's, and the height
+/// of the tallest one any cell of that view would show, so moving the cursor
+/// never resizes the grid under it.
+fn detail_pane(app: &App, width: u16) -> Option<(Pane, u16)> {
+    if app.load_error.is_some() {
+        return None;
+    }
+    let tallest = |panes: Vec<Pane>| panes.iter().map(|p| p.height(width)).max().unwrap_or(0);
+    if app.view == View::Houses {
+        let cols = app.houses.as_ref()?.house.len();
+        let pane = |r: usize, c: usize| match app.house_row_at(r)? {
+            HouseRow::Agent(a) => house_detail(app, a, c),
+            HouseRow::Project(i) => project_detail(app, i, c),
+        };
+        let all = (0..app.house_rows())
+            .flat_map(|r| (0..cols).map(move |c| (r, c)))
+            .filter_map(|(r, c)| pane(r, c))
+            .collect();
+        return Some((pane(app.prow, app.pcol)?, tallest(all)));
+    }
+    let (cfg, plan) = (app.cfg.as_ref()?, app.plan.as_ref()?);
+    let rows: Vec<Option<usize>> = if app.view == View::Skills {
+        plan.skill_rows().into_iter().map(Some).collect()
+    } else {
+        plan.setup_rows()
+            .into_iter()
+            .map(Some)
+            .chain([None])
+            .collect()
     };
-    let Some(agent) = cfg.agents.get(app.col) else {
-        return;
-    };
+    let all = (0..cfg.agents.len())
+        .flat_map(|c| rows.iter().map(move |r| (*r, c)))
+        .filter_map(|(r, c)| detail(app, r, c))
+        .collect();
+    Some((detail(app, app.selected_row(), app.col)?, tallest(all)))
+}
+
+/// Agent `col`'s cell on plan row `row` spelled out: where it lives, how it
+/// is wired, and what `f` or `d` would do to it; `None` is the card's skills
+/// summary.
+fn detail(app: &App, row: Option<usize>, col: usize) -> Option<Pane> {
+    let (cfg, plan) = (app.cfg.as_ref()?, app.plan.as_ref()?);
+    let agent = cfg.agents.get(col)?;
     let dim = Style::default().add_modifier(Modifier::DIM);
     let field =
-        |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<16}"), dim), Span::raw(v)]);
+        |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<17}"), dim), Span::raw(v)]);
     let mut lines = Vec::new();
-    let Some(r) = app.selected_row() else {
+    let Some(r) = row else {
         // The skills line of the card: what f and d do for all of them.
         let rows = plan.skill_rows();
         for r in &rows {
-            let cell = &plan.cells[*r][app.col];
+            let cell = &plan.cells[*r][col];
             lines.push(Line::from(vec![
                 Span::raw(format!("{:<24}", plan.rows[*r].label())),
                 Span::styled(cell.state.word(), state_style(&cell.state)),
@@ -391,21 +496,16 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
             "f links every missing one · d deletes every link canonize made · own ones adopt in the skills tab",
             dim,
         ));
-        let para = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" {} · skills ", agent.name)),
-            )
-            .wrap(Wrap { trim: false });
-        f.render_widget(para, area);
-        return;
+        return Some(Pane {
+            title: format!(" {} · skills ", agent.name),
+            lines,
+        });
     };
     let row = &plan.rows[r];
-    let cell = &plan.cells[r][app.col];
+    let cell = &plan.cells[r][col];
     let title = format!(" {} · {} ", agent.name, row.label());
     lines.push(Line::from(vec![
-        Span::styled(format!("{:<16}", "state"), dim),
+        Span::styled(format!("{:<17}", "state"), dim),
         Span::styled(cell.state.word(), state_style(&cell.state)),
     ]));
     if let State::Broken(why) | State::Foreign(why) = &cell.state {
@@ -424,7 +524,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
             RulesMode::Off => "off".into(),
         },
         plan::Row::Loader => match agent.name.as_str() {
-            "claude" => "per project: `@CANON.md` in its CLAUDE.md (projects tab)".into(),
+            "claude" => "per project: `@CANON.md` in its CLAUDE.md (houses tab)".into(),
             "pi" => "an extension that loads ./CANON.md".into(),
             "opencode" => "`\"instructions\": [\"CANON.md\"]` in opencode.json".into(),
             _ => "this agent has no way to load another file".into(),
@@ -476,10 +576,7 @@ fn render_detail(f: &mut Frame, area: Rect, app: &App) {
     } else if !agent.enabled {
         lines.push(Line::styled("disabled in canonize.toml", dim));
     }
-    let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false });
-    f.render_widget(para, area);
+    Some(Pane { title, lines })
 }
 
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
@@ -495,16 +592,25 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         None => (
             if app.load_error.is_some() {
                 "s set up · ? help · q quit".to_string()
-            } else if app.view == View::Projects {
-                let file = app
-                    .projects
-                    .as_ref()
-                    .and_then(|p| p.list.get(app.prow))
-                    .and_then(|x| x.host.file_name())
-                    .map_or("CLAUDE.md".to_string(), |n| {
-                        n.to_string_lossy().into_owned()
-                    });
-                PROJECT_HINTS.replace("{file}", &file)
+            } else if app.view == View::Houses {
+                let file = match app.house_row() {
+                    Some(HouseRow::Project(i)) => app
+                        .projects
+                        .as_ref()
+                        .and_then(|p| p.list.get(i))
+                        .map(|x| x.host.clone()),
+                    Some(HouseRow::Agent(a)) => app
+                        .houses
+                        .as_ref()
+                        .and_then(|h| h.cells.get(app.pcol)?.get(a))
+                        .map(|c| c.at.clone())
+                        .filter(|at| at.is_file()),
+                    None => None,
+                };
+                let open = file
+                    .and_then(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .map_or(String::new(), |n| format!(" · o open {n}"));
+                HOUSE_HINTS.replace("{open}", &open)
             } else if app.view == View::Skills {
                 SKILL_HINTS.to_string()
             } else if app.in_card {
@@ -519,87 +625,181 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The help, as one body for the reader box that `?` opens.
-pub(super) const HELP: &str = "canonize: one source of truth for your coding agents\n\n\nAgents   j/k agent · ↵ open its card · esc back to the list\n         in the card: f fix the line · d delete it\n         F fix every agent's setup · D delete it all\nSkills   j/k skill · h/l agent · ↵ toggle (link, unlink, or adopt an own one)\n         a link… · d delete… (this cell, row or column; an own skill itself)\n         F link every missing skill · D delete every skill link\nProjects j/k project · h/l house file · ↵ toggle an import\n         a add… · d delete… (this cell, row or column)\n         F fix broken imports and CANON.md wiring · D delete all\n         o open the project's CLAUDE.md or AGENTS.md\nAnywhere tab switch · v validate your canon · e edit canonize.toml\n         r reload · ? help · q quit\n\nlinked   wired to your canon\nunwired  f wires it\nbroken   wired to the wrong thing; f repoints it\nforeign  something of yours or the agent's; left alone\nn/a      the agent has no way to use it\noff, -   turned off, or the agent is not installed\nown      a skill the agent keeps itself; f adopts it into your canon\n";
+pub(super) const HELP: &str = "canonize: one source of truth for your coding agents\n\n\nAgents   j/k agent · ↵ open its card · esc back to the list\n         in the card: f fix the line · d delete it\n         F fix every agent's setup · D delete it all\nSkills   j/k skill · h/l agent · ↵ toggle (link, unlink, or adopt an own one)\n         a link… · d delete… (this cell, row or column; an own skill itself)\n         F link every missing skill · D delete every skill link\nHouses   j/k agent or project · h/l house file · ↵ toggle an import\n         an agent's row: it reads the file in every repo\n         a add… · d delete… (this cell, row or column)\n         F fix broken imports and CANON.md wiring · D delete all\n         o open the file the import sits in\nAnywhere tab switch · v validate your canon · e edit canonize.toml\n         r reload · ? help · q quit\n\nlinked   wired to your canon\nimported a house file is read there\nunwired  f wires it\nbroken   wired to the wrong thing; f repoints it\nforeign  something of yours or the agent's; left alone\nn/a      the agent has no way to use it\noff, -   turned off, or the agent is not installed\nown      a skill the agent keeps itself; f adopts it into your canon\n";
 
-fn render_projects(f: &mut Frame, area: Rect, app: &App) {
-    let (Some(cfg), Some(p)) = (&app.cfg, &app.projects) else {
+/// A house cell's word: `imported` for one that is wired, `-` for one that
+/// is not, since neither needs fixing.
+fn house_word(s: &State) -> &'static str {
+    match s {
+        State::Linked => "imported",
+        State::Missing => "-",
+        s => s.word(),
+    }
+}
+
+/// The houses tab: a column per house file, and a row per place one can be
+/// imported, every agent (for every repo) above every project.
+fn render_houses(f: &mut Frame, area: Rect, app: &App) {
+    let (Some(cfg), Some(h), Some(p)) = (&app.cfg, &app.houses, &app.projects) else {
         return;
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" projects · house imports ");
+        .title(" houses · who reads which house file ");
     let dim = Style::default().add_modifier(Modifier::DIM);
-    if cfg.projects.is_empty() || p.list.is_empty() {
-        let text = if cfg.projects.is_empty() {
-            "No project folders yet. Add `projects = [\"~/dev\"]` to canonize.toml (e to edit) and canonize lists every project with a CLAUDE.md or AGENTS.md."
-        } else {
-            "No project under your project folders has a CLAUDE.md or AGENTS.md."
-        };
-        let para = Paragraph::new(text)
-            .style(dim)
-            .block(block)
-            .wrap(Wrap { trim: false });
+    if h.house.is_empty() {
+        let para = Paragraph::new(
+            "No house files yet: put a HOUSE-<NAME>.md in your canon's house/, then import it here into an agent, for every repo, or into a project.",
+        )
+        .style(dim)
+        .block(block)
+        .wrap(Wrap { trim: false });
         f.render_widget(para, area);
         return;
     }
-    let names: Vec<String> = p
-        .list
+    let names: Vec<String> = cfg
+        .agents
         .iter()
-        .map(|x| projects::short(cfg, &x.root))
+        .map(|a| format!("  {}", a.name))
+        .chain(
+            p.list
+                .iter()
+                .map(|x| format!("  {}", projects::short(cfg, &x.root))),
+        )
         .collect();
     let label_w = names
         .iter()
         .map(|n| n.chars().count())
         .max()
-        .unwrap_or(8)
-        .max(8) as u16;
-    let mut header = vec![Cell::from("house files →").style(dim)];
-    let label_w = label_w.max(14);
+        .unwrap_or(0)
+        .max(12) as u16;
+    let mut header = vec![Cell::from("")];
     let mut widths = vec![Constraint::Length(label_w + 1)];
-    for h in &p.house {
-        let label = crate::cli::house_label(h);
+    for house in &h.house {
+        let label = crate::cli::house_label(house);
         widths.push(Constraint::Length(label.chars().count().max(10) as u16 + 2));
         header.push(Cell::from(label).style(Style::default().add_modifier(Modifier::BOLD)));
     }
-    let rows: Vec<Row> = p
-        .list
-        .iter()
-        .enumerate()
-        .map(|(r, x)| {
-            let mut cells = vec![Cell::from(names[r].clone())];
-            for (c, cell) in x.cells.iter().enumerate() {
-                let (word, mut style) = match &cell.state {
-                    State::Linked => ("imported", Style::default().fg(Color::Green)),
-                    State::Broken(_) => ("broken", Style::default().fg(Color::Yellow)),
-                    _ => ("-", dim),
-                };
-                if app.prow == r && app.pcol == c {
-                    style = style.add_modifier(Modifier::REVERSED);
+    let section = |text: &str| Row::new(vec![Cell::from(text.to_string()).style(dim)]);
+    let mut rows = vec![section("every repo")];
+    // The display row of the selection, past the section lines above it.
+    let mut selected = 0;
+    for (r, name) in names.iter().enumerate() {
+        let (label, states): (Style, Vec<&State>) = match app.house_row_at(r) {
+            Some(HouseRow::Agent(a)) => (
+                if cfg.agents[a].active() {
+                    Style::default()
+                } else {
+                    dim
+                },
+                h.cells.iter().map(|row| &row[a].state).collect(),
+            ),
+            Some(HouseRow::Project(i)) => {
+                if i == 0 {
+                    rows.push(section(""));
+                    rows.push(section("projects"));
                 }
-                cells.push(Cell::from(format!(" {word} ")).style(style));
+                (
+                    Style::default(),
+                    p.list[i].cells.iter().map(|c| &c.state).collect(),
+                )
             }
-            Row::new(cells)
-        })
-        .collect();
+            None => continue,
+        };
+        if r == app.prow {
+            selected = rows.len();
+        }
+        let mut cells = vec![Cell::from(name.clone()).style(label)];
+        for (c, state) in states.into_iter().enumerate() {
+            let mut style = if *state == State::Missing {
+                dim
+            } else {
+                state_style(state)
+            };
+            if r == app.prow && c == app.pcol {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            cells.push(Cell::from(format!(" {} ", house_word(state))).style(style));
+        }
+        rows.push(Row::new(cells));
+    }
+    if p.list.is_empty() {
+        rows.push(section(""));
+        rows.push(section(if cfg.projects.is_empty() {
+            "projects: none yet, add `projects = [\"~/dev\"]` to canonize.toml (e)"
+        } else {
+            "projects: none under your project folders has a CLAUDE.md or AGENTS.md"
+        }));
+    }
+    let total = rows.len();
     let table = Table::new(rows, widths)
         .header(Row::new(header).bottom_margin(1))
         .block(block);
-    f.render_widget(table, area);
+    render_grid(f, area, table, total, selected, &app.ptop);
 }
 
-fn render_project_detail(f: &mut Frame, area: Rect, app: &App) {
-    let (Some(cfg), Some(p)) = (&app.cfg, &app.projects) else {
-        return;
-    };
-    let (Some(x), Some(h)) = (p.list.get(app.prow), p.house.get(app.pcol)) else {
-        let para = Paragraph::new("").block(Block::default().borders(Borders::ALL));
-        f.render_widget(para, area);
-        return;
-    };
+/// Agent `a`'s import of house file `col` spelled out.
+fn house_detail(app: &App, a: usize, col: usize) -> Option<Pane> {
+    let (cfg, h) = (app.cfg.as_ref()?, app.houses.as_ref()?);
+    let (house, cell, agent) = (
+        h.house.get(col)?,
+        h.cells.get(col)?.get(a)?,
+        cfg.agents.get(a)?,
+    );
     let dim = Style::default().add_modifier(Modifier::DIM);
     let field =
-        |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<16}"), dim), Span::raw(v)]);
-    let cell = &x.cells[app.pcol];
+        |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<17}"), dim), Span::raw(v)]);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!("{:<17}", "state"), dim),
+        Span::styled(
+            match cell.state.why() {
+                Some(why) => format!("{}: {why}", house_word(&cell.state)),
+                None if cell.state == State::Missing => "not read".to_string(),
+                None => house_word(&cell.state).to_string(),
+            },
+            state_style(&cell.state),
+        ),
+    ])];
+    lines.push(field("house", tilde(house)));
+    if !matches!(cell.state, State::Na | State::Absent) {
+        lines.push(field("at", tilde(&cell.at)));
+    }
+    let toggle = if cell.state == State::Linked {
+        cell.undo.as_ref()
+    } else {
+        cell.change.as_ref()
+    };
+    match toggle {
+        Some(c) => lines.push(field(&format!("↵ {}", c.verb()), c.describe())),
+        None => lines.push(field("↵", "nothing to do".to_string())),
+    }
+    if cell.state == State::Na {
+        lines.push(Line::styled(
+            format!("{} has no way to load another file", agent.name),
+            dim,
+        ));
+    } else if !agent.installed() {
+        lines.push(Line::styled(
+            format!("not installed: {} does not exist", tilde(&agent.home)),
+            dim,
+        ));
+    } else if !agent.enabled {
+        lines.push(Line::styled("disabled in canonize.toml", dim));
+    }
+    Some(Pane {
+        title: format!(" {} · {} ", agent.name, crate::cli::house_label(house)),
+        lines,
+    })
+}
+
+/// Project `prow`'s import of house file `pcol` spelled out, and its wiring.
+fn project_detail(app: &App, prow: usize, pcol: usize) -> Option<Pane> {
+    let (cfg, p) = (app.cfg.as_ref()?, app.projects.as_ref()?);
+    let (x, h) = (p.list.get(prow)?, p.house.get(pcol)?);
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let field =
+        |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<17}"), dim), Span::raw(v)]);
+    let cell = &x.cells[pcol];
     let mut lines = vec![field(
         "state",
         match &cell.state {
@@ -646,8 +846,5 @@ fn render_project_detail(f: &mut Frame, area: Rect, app: &App) {
         projects::short(cfg, &x.root),
         crate::cli::house_label(h)
     );
-    let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(Wrap { trim: false });
-    f.render_widget(para, area);
+    Some(Pane { title, lines })
 }

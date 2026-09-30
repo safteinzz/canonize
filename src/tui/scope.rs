@@ -1,4 +1,4 @@
-//! The scope picker behind `a` and `d` in the skills and projects tabs (cyan):
+//! The scope picker behind `a` and `d` in the skills and houses tabs (cyan):
 //! add or remove for this cell, its row or its column, each choice named by the
 //! real skill, file, agent or project and carrying the changes it would make.
 

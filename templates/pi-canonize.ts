@@ -1,6 +1,7 @@
 /**
- * canonize: loads the project's CANON.md, and the house files its `@` lines
- * name, into pi's context, the way Claude reads it through CLAUDE.md.
+ * canonize: loads the CANON.md in pi's own folder, then the project's, and the
+ * house files their `@` lines name, into pi's context, the way Claude reads
+ * them through CLAUDE.md.
  * Written by `canon`; delete this file to stop it.
  */
 
@@ -9,27 +10,38 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
+/** The house files `canon` wires into pi for every project. */
+const AGENT_CANON = "__AGENT_CANON__";
+
 function resolve(target: string, fromDir: string): string {
 	if (target.startsWith("~/")) return path.join(os.homedir(), target.slice(2));
 	return path.resolve(fromDir, target);
 }
 
+/** The house files one CANON.md names, each as a section. */
+function sections(canon: string, seen: Set<string>): string[] {
+	if (!fs.existsSync(canon)) return [];
+	const out: string[] = [];
+	for (const line of fs.readFileSync(canon, "utf8").split("\n")) {
+		const m = line.trim().match(/^@(\S+)$/);
+		if (!m) continue;
+		const file = resolve(m[1]!, path.dirname(canon));
+		if (seen.has(file) || !fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
+		seen.add(file);
+		out.push(`# ${path.basename(file)}\n\n${fs.readFileSync(file, "utf8").trim()}`);
+	}
+	return out;
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", (event) => {
-		const dir = process.cwd();
-		const canon = path.join(dir, "CANON.md");
-		if (!fs.existsSync(canon)) return;
+		const seen = new Set<string>();
+		const all = [
+			...sections(AGENT_CANON, seen),
+			...sections(path.join(process.cwd(), "CANON.md"), seen),
+		];
+		if (all.length === 0) return;
 
-		const sections: string[] = [];
-		for (const line of fs.readFileSync(canon, "utf8").split("\n")) {
-			const m = line.trim().match(/^@(\S+)$/);
-			if (!m) continue;
-			const file = resolve(m[1]!, dir);
-			if (!fs.existsSync(file) || !fs.statSync(file).isFile()) continue;
-			sections.push(`# ${path.basename(file)}\n\n${fs.readFileSync(file, "utf8").trim()}`);
-		}
-		if (sections.length === 0) return;
-
-		return { systemPrompt: `${event.systemPrompt}\n\n${sections.join("\n\n---\n\n")}\n` };
+		return { systemPrompt: `${event.systemPrompt}\n\n${all.join("\n\n---\n\n")}\n` };
 	});
 }

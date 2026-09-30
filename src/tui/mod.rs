@@ -12,6 +12,7 @@ mod wizard;
 
 use crate::check::{self, Report};
 use crate::config::{self, Config, tilde};
+use crate::houses::Houses;
 use crate::plan::{self, Change, Plan, State};
 use crate::projects::{self, Projects};
 use crate::setup;
@@ -26,6 +27,7 @@ use crossterm::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use scope::{Picked, Scope};
+use std::cell::Cell;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::process::Command;
@@ -42,11 +44,18 @@ pub(super) enum CardLine {
     Skills,
 }
 
+/// A row of the houses tab: an agent, for every repo, or one project.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum HouseRow {
+    Agent(usize),
+    Project(usize),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum View {
     Agents,
     Skills,
-    Projects,
+    Houses,
 }
 
 /// How long a status message stays on screen before the hints return.
@@ -61,6 +70,7 @@ pub(super) struct App {
     pub(super) cfg: Option<Config>,
     pub(super) plan: Option<Plan>,
     pub(super) projects: Option<Projects>,
+    pub(super) houses: Option<Houses>,
     pub(super) view: View,
     /// The selected line of the agent's card in the agents tab.
     pub(super) aline: usize,
@@ -68,15 +78,20 @@ pub(super) struct App {
     pub(super) in_card: bool,
     /// The selected skill in the skills tab, an index into `Plan::skill_rows`.
     pub(super) srow: usize,
-    /// The selected project and house file in the projects view.
+    /// The selected row and house file in the houses tab: agents first, each
+    /// for every repo, then the projects (`house_row`).
     pub(super) prow: usize,
     pub(super) pcol: usize,
+    /// The first row each grid shows, kept between frames so moving back up
+    /// scrolls only once the selection reaches the top.
+    pub(super) stop: Cell<usize>,
+    pub(super) ptop: Cell<usize>,
     pub(super) report: Option<Report>,
     pub(super) col: usize,
     pub(super) confirm: Option<Confirm>,
     /// A delete waiting for its name to be typed.
     pub(super) typed: Option<Typed>,
-    /// The add or remove scope being chosen in the projects tab.
+    /// The add or remove scope being chosen in the skills or houses tab.
     pub(super) scope: Option<Scope>,
     /// The setup questions, while they are being answered.
     pub(super) wizard: Option<Wizard>,
@@ -98,11 +113,14 @@ impl App {
             cfg: None,
             plan: None,
             projects: None,
+            houses: None,
             view: View::Agents,
             aline: 0,
             in_card: false,
             srow: 0,
             prow: 0,
+            stop: Cell::new(0),
+            ptop: Cell::new(0),
             pcol: 0,
             report: None,
             col: 0,
@@ -136,6 +154,7 @@ impl App {
             Ok(cfg) => {
                 self.plan = Some(Plan::build(&cfg));
                 self.projects = Some(Projects::build(&cfg));
+                self.houses = Some(Houses::build(&cfg));
                 self.report = Some(check::run(&cfg.source));
                 self.cfg = Some(cfg);
                 self.load_error = None;
@@ -144,6 +163,7 @@ impl App {
                 self.cfg = None;
                 self.plan = None;
                 self.projects = None;
+                self.houses = None;
                 self.report = None;
                 self.load_error = Some(format!("{e:#}"));
             }
@@ -161,8 +181,8 @@ impl App {
         {
             self.srow = n;
         }
+        self.prow = self.prow.min(self.house_rows().saturating_sub(1));
         if let Some(p) = &self.projects {
-            self.prow = self.prow.min(p.list.len().saturating_sub(1));
             self.pcol = self.pcol.min(p.house.len().saturating_sub(1));
         }
     }
@@ -265,16 +285,14 @@ impl App {
             self.in_card = false;
             self.view = match self.view {
                 View::Agents => View::Skills,
-                View::Skills => View::Projects,
-                View::Projects => View::Agents,
+                View::Skills => View::Houses,
+                View::Houses => View::Agents,
             };
             return None;
         }
-        if self.view == View::Projects {
-            let (rows, cols) = self
-                .projects
-                .as_ref()
-                .map_or((0, 0), |p| (p.list.len(), p.house.len()));
+        if self.view == View::Houses {
+            let rows = self.house_rows();
+            let cols = self.projects.as_ref().map_or(0, |p| p.house.len());
             match key.code {
                 Down | Char('j') => {
                     self.prow = (self.prow + 1).min(rows.saturating_sub(1));
@@ -301,18 +319,12 @@ impl App {
                     return None;
                 }
                 Char('f') => {
-                    self.project_cell(true);
+                    self.house_toggle(Some(true));
                     return None;
                 }
                 // A grid of imports reads like checkboxes, so Enter toggles.
                 Enter | Char(' ') => {
-                    let imported = self
-                        .projects
-                        .as_ref()
-                        .and_then(|p| p.list.get(self.prow))
-                        .and_then(|x| x.cells.get(self.pcol))
-                        .is_some_and(|c| c.state == State::Linked);
-                    self.project_cell(!imported);
+                    self.house_toggle(None);
                     return None;
                 }
                 Char('a') => {
@@ -324,27 +336,39 @@ impl App {
                     return None;
                 }
                 Char('D') => {
-                    let changes: Vec<Change> = self
-                        .projects
-                        .iter()
-                        .flat_map(|p| p.list.iter())
-                        .flat_map(|x| x.cells.iter())
-                        .filter_map(|c| c.undo.clone())
-                        .collect();
+                    let mut changes: Vec<Change> = self
+                        .houses
+                        .as_ref()
+                        .map(|h| h.undos(None))
+                        .unwrap_or_default();
+                    changes.extend(
+                        self.projects
+                            .iter()
+                            .flat_map(|p| p.list.iter())
+                            .flat_map(|x| x.cells.iter())
+                            .filter_map(|c| c.undo.clone()),
+                    );
                     self.confirm_scope(
                         true,
                         "Delete",
-                        "every house file from every project",
+                        "every house file from every agent and project",
                         changes,
                     );
                     return None;
                 }
                 Char('o') => {
-                    return self
-                        .projects
-                        .as_ref()
-                        .and_then(|p| p.list.get(self.prow))
-                        .map(|x| Edit(x.host.clone()));
+                    return match self.house_row()? {
+                        HouseRow::Project(i) => self
+                            .projects
+                            .as_ref()?
+                            .list
+                            .get(i)
+                            .map(|x| Edit(x.host.clone())),
+                        HouseRow::Agent(a) => {
+                            let at = &self.houses.as_ref()?.cells.get(self.pcol)?.get(a)?.at;
+                            at.is_file().then(|| Edit(at.clone()))
+                        }
+                    };
                 }
                 _ => {}
             }
@@ -367,8 +391,8 @@ impl App {
                 _ => {}
             }
         }
-        // Keys only the agents tab has must not reach it from the projects tab.
-        if self.view == View::Projects && matches!(key.code, Char('f' | 'd' | 'D') | Enter) {
+        // Keys only the agents tab has must not reach it from the houses tab.
+        if self.view == View::Houses && matches!(key.code, Char('f' | 'd' | 'D') | Enter) {
             return None;
         }
         let (_, agents) = self.size();
@@ -424,6 +448,12 @@ impl App {
             }
             _ => {}
         }
+        self.anywhere(key)
+    }
+
+    /// The keys every tab answers to.
+    fn anywhere(&mut self, key: KeyEvent) -> Option<Edit> {
+        use KeyCode::*;
         match key.code {
             Char('q') | Esc => self.should_quit = true,
             Char('?') => self.note = Some(Note::reader("help", render::HELP.to_string())),
@@ -435,7 +465,7 @@ impl App {
             Char('F') => self.offer_fix_all(),
             Char('d') => self.agent_cell(false),
             Char('D') if self.view == View::Skills => self.remove_skills_all(),
-            Char('D') => self.remove_agents_all(),
+            Char('D') if self.view == View::Agents => self.remove_agents_all(),
             Char('v') => self.show_check(),
             Char('s') if self.load_error.is_some() => self.propose_setup(),
             Char('e') => {
@@ -477,13 +507,20 @@ impl App {
                 c.extend(plan.stale_for(None).into_iter().cloned());
                 (c, "every missing or broken skill link")
             }
-            View::Projects => (
-                self.projects
+            View::Houses => {
+                let mut c = self
+                    .houses
                     .as_ref()
-                    .map(|p| p.fixes())
-                    .unwrap_or_default(),
-                "every project's broken imports and CANON.md wiring",
-            ),
+                    .map(|h| h.fixes(None))
+                    .unwrap_or_default();
+                c.extend(
+                    self.projects
+                        .as_ref()
+                        .map(|p| p.fixes())
+                        .unwrap_or_default(),
+                );
+                (c, "every broken house import and CANON.md wiring")
+            }
         };
         if changes.is_empty() {
             self.set_status(format!("nothing to fix: {what} is up to date"));
@@ -525,10 +562,15 @@ impl App {
     /// cell, every house file in this project, then its house file in every
     /// project, the widest and least likely.
     fn open_scope(&mut self, remove: bool) {
+        let prow = match self.house_row() {
+            Some(HouseRow::Project(i)) => i,
+            Some(HouseRow::Agent(a)) => return self.open_agent_scope(a, remove),
+            None => return,
+        };
         let (Some(p), Some(cfg)) = (&self.projects, &self.cfg) else {
             return;
         };
-        let (Some(x), Some(h)) = (p.list.get(self.prow), p.house.get(self.pcol)) else {
+        let (Some(x), Some(h)) = (p.list.get(prow), p.house.get(self.pcol)) else {
             return;
         };
         let pick = |c: &crate::projects::Cell| {
@@ -906,12 +948,116 @@ impl App {
         );
     }
 
-    /// Add or repoint (`fix`), or remove (`!fix`), the selected house import.
-    fn project_cell(&mut self, fix: bool) {
+    /// The houses tab's `a` and `d` on an agent's row: this cell, every house
+    /// file for this agent, or this house file for every agent.
+    fn open_agent_scope(&mut self, a: usize, remove: bool) {
+        let (Some(h), Some(cfg)) = (&self.houses, &self.cfg) else {
+            return;
+        };
+        let (Some(house), Some(row)) = (h.house.get(self.pcol), h.cells.get(self.pcol)) else {
+            return;
+        };
+        let pick = |c: &crate::plan::Cell| {
+            if remove {
+                c.undo.clone()
+            } else if c.state == State::Linked {
+                None
+            } else {
+                c.change.clone()
+            }
+        };
+        let file = house
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let agent = &cfg.agents[a].name;
+        let to = if remove { "from" } else { "to" };
+        let mut items = vec![
+            (
+                format!("{file} {to} {agent}, in every repo"),
+                plan::dedup(pick(&row[a]).into_iter()),
+            ),
+            (
+                format!("every house file {to} {agent}"),
+                plan::dedup(h.cells.iter().filter_map(|r| pick(&r[a]))),
+            ),
+            (
+                format!("{file} {to} every agent"),
+                plan::dedup(row.iter().filter_map(pick)),
+            ),
+        ];
+        items.retain(|(_, changes): &(String, Vec<Change>)| !changes.is_empty());
+        if items.is_empty() {
+            self.set_status(match (row[a].state.why(), remove) {
+                (Some(why), false) => format!("{agent}: {why}"),
+                (None, false) if row[a].state == State::Na => {
+                    format!("{agent} has no way to read another file")
+                }
+                _ => format!("nothing to {} here", if remove { "delete" } else { "add" }),
+            });
+            return;
+        }
+        self.scope = Some(Scope {
+            remove,
+            verb: if remove { "Delete" } else { "Add" },
+            items,
+            picked: 0,
+        });
+    }
+
+    /// Rows in the houses tab: every agent, then every project.
+    pub(super) fn house_rows(&self) -> usize {
+        self.cfg.as_ref().map_or(0, |c| c.agents.len())
+            + self.projects.as_ref().map_or(0, |p| p.list.len())
+    }
+
+    /// What the houses tab's row `r` is.
+    pub(super) fn house_row_at(&self, r: usize) -> Option<HouseRow> {
+        let agents = self.cfg.as_ref()?.agents.len();
+        if r < agents {
+            return Some(HouseRow::Agent(r));
+        }
+        let i = r - agents;
+        (i < self.projects.as_ref()?.list.len()).then_some(HouseRow::Project(i))
+    }
+
+    pub(super) fn house_row(&self) -> Option<HouseRow> {
+        self.house_row_at(self.prow)
+    }
+
+    /// Enter (`None`, a toggle) or `f` (`Some(true)`) in the houses tab.
+    fn house_toggle(&mut self, fix: Option<bool>) {
+        let imported = |c: Option<&State>| c.is_some_and(|s| *s == State::Linked);
+        match self.house_row() {
+            Some(HouseRow::Agent(a)) => {
+                let now = imported(
+                    self.houses
+                        .as_ref()
+                        .and_then(|h| h.cells.get(self.pcol)?.get(a))
+                        .map(|c| &c.state),
+                );
+                self.house_cell(a, fix.unwrap_or(!now));
+            }
+            Some(HouseRow::Project(i)) => {
+                let now = imported(
+                    self.projects
+                        .as_ref()
+                        .and_then(|p| p.list.get(i)?.cells.get(self.pcol))
+                        .map(|c| &c.state),
+                );
+                self.project_cell(i, fix.unwrap_or(!now));
+            }
+            None => {}
+        }
+    }
+
+    /// Add or repoint (`fix`), or remove (`!fix`), project `prow`'s import of
+    /// the selected house file.
+    fn project_cell(&mut self, prow: usize, fix: bool) {
         let (Some(p), Some(cfg)) = (&self.projects, &self.cfg) else {
             return;
         };
-        let (Some(project), Some(house)) = (p.list.get(self.prow), p.house.get(self.pcol)) else {
+        let (Some(project), Some(house)) = (p.list.get(prow), p.house.get(self.pcol)) else {
             return;
         };
         let cell = &project.cells[self.pcol];
@@ -952,6 +1098,59 @@ impl App {
                     "delete",
                     format!("Stop {name} importing {file}?"),
                     Action::Changes(changes),
+                )
+            }
+            .runs(runs),
+        );
+    }
+
+    /// Add or repoint (`fix`), or take back (`!fix`), agent `a`'s import of
+    /// the selected house file.
+    fn house_cell(&mut self, a: usize, fix: bool) {
+        let (Some(h), Some(cfg)) = (&self.houses, &self.cfg) else {
+            return;
+        };
+        let (Some(house), Some(cell)) = (
+            h.house.get(self.pcol),
+            h.cells.get(self.pcol).and_then(|r| r.get(a)),
+        ) else {
+            return;
+        };
+        let agent = &cfg.agents[a].name;
+        let file = house
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let change = if fix { &cell.change } else { &cell.undo };
+        let Some(change) = change.clone() else {
+            self.set_status(match (&cell.state, fix) {
+                (State::Linked, true) => format!("{agent} already reads {file}"),
+                (_, false) => format!("{agent} does not read {file}"),
+                (s, true) => match s.why() {
+                    Some(why) => format!("{agent}: {why}"),
+                    None => format!("{agent} has no way to read another file"),
+                },
+            });
+            return;
+        };
+        let runs = Self::runs(std::slice::from_ref(&change));
+        self.confirm = Some(
+            if fix {
+                let verb = if matches!(cell.state, State::Broken(_)) {
+                    "Repoint"
+                } else {
+                    "Add"
+                };
+                Confirm::offer(
+                    &verb.to_lowercase(),
+                    format!("{verb} {file} for {agent}, in every repo?"),
+                    Action::Changes(vec![change]),
+                )
+            } else {
+                Confirm::gate(
+                    "delete",
+                    format!("Stop {agent} reading {file}?"),
+                    Action::Changes(vec![change]),
                 )
             }
             .runs(runs),

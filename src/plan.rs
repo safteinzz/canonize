@@ -511,7 +511,7 @@ fn is_canon_file(file: &Path) -> bool {
 /// A file's text, or nothing when it is not there. A file that is not UTF-8 is
 /// an error rather than an empty string, because writing an empty string back
 /// would replace everything in it.
-fn read_text(file: &Path) -> Result<Option<String>> {
+pub fn read_text(file: &Path) -> Result<Option<String>> {
     match fs::read(file) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e).with_context(|| format!("could not read `{}`", tilde(file))),
@@ -815,7 +815,7 @@ pub fn dedup(changes: impl Iterator<Item = Change>) -> Vec<Change> {
     out
 }
 
-fn absent(at: PathBuf, state: State) -> Cell {
+pub fn absent(at: PathBuf, state: State) -> Cell {
     Cell {
         state,
         at,
@@ -831,15 +831,31 @@ fn rules_cell(cfg: &Config, agent: &Agent) -> Cell {
     match agent.rules_mode {
         RulesMode::Off => absent(agent.rules.clone(), State::Off),
         RulesMode::Link => link_cell(&agent.rules, &cfg.source.rules, &cfg.source.root),
-        RulesMode::Import => import_cell(&agent.rules, &cfg.source.rules, &cfg.source.root),
+        RulesMode::Import => import_cell(
+            &agent.rules,
+            &cfg.source.rules,
+            &cfg.source.root,
+            &config::house_files(&cfg.source),
+        ),
     }
 }
 
 /// The pi extension canonize writes for CANON.md.
 const PI_EXTENSION: &str = include_str!("../templates/pi-canonize.ts");
 
+/// Where pi's extension lives, and the text canonize writes there for this
+/// agent: the template with the path of the CANON.md in pi's own folder.
+pub fn pi_extension(agent: &Agent) -> (PathBuf, String) {
+    let canon = agent.home.join(CANON_FILE);
+    let quoted = serde_json::to_string(&canon.to_string_lossy()).unwrap_or_default();
+    (
+        agent.home.join("extensions").join("canonize.ts"),
+        PI_EXTENSION.replace("\"__AGENT_CANON__\"", &quoted),
+    )
+}
+
 /// Whether the agent will read a project's CANON.md. Claude does it through
-/// the project's own CLAUDE.md, which the projects tab wires; pi through an
+/// the project's own CLAUDE.md, which the houses tab wires; pi through an
 /// extension canonize writes; opencode through its `instructions` setting;
 /// anything else has no way to.
 fn loader_cell(agent: &Agent) -> Cell {
@@ -848,7 +864,7 @@ fn loader_cell(agent: &Agent) -> Cell {
     }
     match agent.name.as_str() {
         "pi" => {
-            let file = agent.home.join("extensions").join("canonize.ts");
+            let (file, body) = pi_extension(agent);
             let state = if file.is_file() {
                 State::Linked
             } else {
@@ -857,7 +873,7 @@ fn loader_cell(agent: &Agent) -> Cell {
             Cell {
                 change: (state == State::Missing).then(|| Change::WriteFile {
                     file: file.clone(),
-                    body: PI_EXTENSION.to_string(),
+                    body,
                     what: "the pi extension that loads CANON.md".into(),
                 }),
                 undo: (state == State::Linked).then(|| Change::DeleteFile {
@@ -983,7 +999,7 @@ fn leftovers(cfg: &Config, agent: &Agent, skills: &[String]) -> (Vec<String>, Ve
     (other, gone)
 }
 
-fn is_link(p: &Path) -> bool {
+pub fn is_link(p: &Path) -> bool {
     fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
 }
 
@@ -1061,7 +1077,7 @@ fn link_cell(at: &Path, to: &Path, root: &Path) -> Cell {
 
 /// Whether an `@path` line names this file, however the path is spelled: with
 /// `~`, in full, or through a link such as `~/.config/canonize`.
-fn names_file(line: &str, file: &Path) -> bool {
+pub fn names_file(line: &str, file: &Path) -> bool {
     let Some(p) = line
         .strip_prefix('@')
         .filter(|p| !p.is_empty() && !p.contains(' '))
@@ -1076,8 +1092,9 @@ fn names_file(line: &str, file: &Path) -> bool {
         }
 }
 
-/// `file` should carry an `@path` line naming `rules`.
-fn import_cell(file: &Path, rules: &Path, root: &Path) -> Cell {
+/// `file` should carry an `@path` line naming `rules`. A gone import named
+/// like one of the `house` files is that house file's, never the rules'.
+fn import_cell(file: &Path, rules: &Path, root: &Path, house: &[PathBuf]) -> Cell {
     let line = format!("@{}", tilde(rules));
     let cell = |state, change, undo| Cell {
         state,
@@ -1141,7 +1158,9 @@ fn import_cell(file: &Path, rules: &Path, root: &Path) -> Cell {
     let old = text.lines().map(str::trim).find(|l| {
         l.strip_prefix('@').is_some_and(|p| {
             let p = config::expand(p);
-            (p.starts_with(root) || p.file_name() == rules.file_name()) && !p.exists()
+            (p.starts_with(root) || p.file_name() == rules.file_name())
+                && !p.exists()
+                && !house.iter().any(|h| h.file_name() == p.file_name())
         })
     });
     match old {

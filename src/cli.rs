@@ -3,6 +3,7 @@
 
 use crate::check;
 use crate::config::{self, Config, RulesMode, SkillsMode, tilde};
+use crate::houses::Houses;
 use crate::init;
 use crate::plan::{self, Change, Plan, Row, State};
 use crate::projects::{self, Projects};
@@ -172,15 +173,19 @@ pub fn status(args: AgentArgs) -> Result<i32> {
     let only = pick(&cfg, &args.agent)?;
     let plan = Plan::build(&cfg);
     let projects = Projects::build(&cfg);
+    let houses = Houses::build(&cfg);
     let unsettled = plan.unsettled(only);
-    // With `-a`, only that agent's drift counts: the projects table is not
+    // With `-a`, only that agent's drift counts: the projects' rows are not
     // printed either, so a gate on one agent is about that agent alone.
-    let unfixed = plan.drifted(only) || (only.is_none() && projects.drifted());
+    let unfixed =
+        plan.drifted(only) || houses.drifted(only) || (only.is_none() && projects.drifted());
     let code = i32::from(unfixed || (args.strict && !unsettled.is_empty()));
     if args.json {
         out!(
             "{}",
-            serde_json::to_string_pretty(&status_json(&cfg, &plan, &projects, only, code))?
+            serde_json::to_string_pretty(&status_json(
+                &cfg, &plan, &houses, &projects, only, code
+            ))?
         );
         return Ok(code);
     }
@@ -268,9 +273,8 @@ pub fn status(args: AgentArgs) -> Result<i32> {
     for c in plan.stale_for(only) {
         notes.push(format!("stale: {}", c.describe()));
     }
-    if only.is_none() && !cfg.projects.is_empty() {
-        print_projects(&cfg, &projects, &mut notes);
-    }
+    let shown = (only.is_none() && !cfg.projects.is_empty()).then_some(&projects);
+    print_houses(&cfg, &houses, shown, &cols, &mut notes);
     if !notes.is_empty() {
         out!();
         for n in notes {
@@ -377,6 +381,7 @@ fn writes_into_canon(cfg: &Config, only: Option<usize>) -> Option<(Vec<String>, 
 fn status_json(
     cfg: &Config,
     plan: &Plan,
+    houses: &Houses,
     projects: &Projects,
     only: Option<usize>,
     code: i32,
@@ -424,6 +429,28 @@ fn status_json(
         .iter()
         .filter(|&&i| !plan.foreign[i].is_empty())
         .map(|&i| (cfg.agents[i].name.clone(), json!(plan.foreign[i])))
+        .collect();
+    let houses_json: Vec<Value> = houses
+        .house
+        .iter()
+        .zip(&houses.cells)
+        .map(|(h, row)| {
+            let cells: serde_json::Map<String, Value> = cols
+                .iter()
+                .map(|&i| {
+                    let c = &row[i];
+                    (
+                        cfg.agents[i].name.clone(),
+                        json!({
+                            "state": house_state(&c.state),
+                            "why": c.state.why(),
+                            "at": c.at,
+                        }),
+                    )
+                })
+                .collect();
+            json!({ "name": house_label(h), "path": h, "cells": cells })
+        })
         .collect();
     let projects_json: Vec<Value> = projects
         .list
@@ -475,6 +502,7 @@ fn status_json(
         "rows": rows,
         "leftovers": leftovers,
         "stale": plan.stale_for(only).into_iter().map(Change::describe).collect::<Vec<_>>(),
+        "houses": houses_json,
         "projects": projects_json,
         "unsettled": unsettled,
         "strays": config::strays(&cfg.source)
@@ -484,7 +512,9 @@ fn status_json(
         "writes_into_canon": writes_into_canon(cfg, only).map(|(agents, advice)| json!({
             "agents": agents, "advice": advice
         })),
-        "drifted": plan.drifted(only) || (only.is_none() && projects.drifted()),
+        "drifted": plan.drifted(only)
+            || houses.drifted(only)
+            || (only.is_none() && projects.drifted()),
         "exit": code,
     })
 }
@@ -498,31 +528,84 @@ pub fn house_label(path: &std::path::Path) -> String {
     stem.strip_prefix("HOUSE-").unwrap_or(&stem).to_lowercase()
 }
 
-fn print_projects(cfg: &Config, p: &Projects, notes: &mut Vec<String>) {
-    out!();
-    let label_w = p
-        .list
-        .iter()
-        .map(|x| projects::short(cfg, &x.root).chars().count())
-        .max()
-        .unwrap_or(8)
-        .max(8);
-    let cols: Vec<String> = p.house.iter().map(|h| house_label(h)).collect();
-    // `dimmed` adds escape codes, so the padding is worked out on the bare word.
-    let head = format!(
-        "{}{}",
-        "projects".dimmed(),
-        " ".repeat(label_w.saturating_sub(8))
-    );
-    let mut line = head;
-    for c in &cols {
-        line.push_str(&format!(
-            "  {}{}",
-            c.bold(),
-            " ".repeat(10usize.saturating_sub(c.chars().count()))
-        ));
+/// A house cell's state name for `--json`: `imported` where the rows say
+/// `linked`, and `none` for one that is not wired, which is no drift.
+fn house_state(state: &State) -> &'static str {
+    match state {
+        State::Linked => "imported",
+        State::Missing => "none",
+        s => s.id(),
     }
-    out!("{}", line.trim_end());
+}
+
+/// Who reads which house file, as one table under the agents': each agent's
+/// row is for every repo. Printed only when the canon has house files.
+fn print_houses(
+    cfg: &Config,
+    h: &Houses,
+    p: Option<&Projects>,
+    cols: &[usize],
+    notes: &mut Vec<String>,
+) {
+    if h.house.is_empty() {
+        return;
+    }
+    out!();
+    let houses: Vec<String> = h.house.iter().map(|x| house_label(x)).collect();
+    let label_w = cols
+        .iter()
+        .map(|&i| cfg.agents[i].name.chars().count())
+        .chain(
+            p.into_iter()
+                .flat_map(|p| &p.list)
+                .map(|x| projects::short(cfg, &x.root).chars().count()),
+        )
+        .max()
+        .unwrap_or(0)
+        .max(10);
+    // `dimmed` adds escape codes, so the padding is worked out on the bare word.
+    let head = |title: &str| {
+        let mut line = format!(
+            "{}{}",
+            title.dimmed(),
+            " ".repeat(label_w.saturating_sub(title.chars().count()))
+        );
+        for c in &houses {
+            line.push_str(&format!(
+                "  {}{}",
+                c.bold(),
+                " ".repeat(10usize.saturating_sub(c.chars().count()))
+            ));
+        }
+        out!("{}", line.trim_end());
+    };
+    head("every repo");
+    for &i in cols {
+        let name = &cfg.agents[i].name;
+        let mut line = format!("{name:label_w$}");
+        for (house, row) in houses.iter().zip(&h.cells) {
+            let s = &row[i].state;
+            let (word, painted) = match s {
+                State::Linked => ("imported", "imported".green().to_string()),
+                State::Missing => ("-", "-".dimmed().to_string()),
+                _ => (s.word(), paint(s)),
+            };
+            line.push_str(&format!("  {painted}{}", " ".repeat(10 - word.len())));
+            if let Some(why) = s.why() {
+                notes.push(format!("{name} {house}: {why}"));
+            }
+        }
+        out!("{}", line.trim_end());
+    }
+    if let Some(p) = p {
+        head("projects");
+        print_projects(cfg, p, label_w, notes);
+    }
+}
+
+/// The projects' rows of the houses table, under a header already printed.
+fn print_projects(cfg: &Config, p: &Projects, label_w: usize, notes: &mut Vec<String>) {
+    let cols: Vec<String> = p.house.iter().map(|h| house_label(h)).collect();
     for x in &p.list {
         let mut line = format!("{:label_w$}", projects::short(cfg, &x.root));
         for c in &x.cells {
@@ -593,6 +676,7 @@ pub fn fix(args: ChangeArgs) -> Result<i32> {
             all
         }
     };
+    let changes = plan::dedup(changes.into_iter().chain(Houses::build(&cfg).fixes(only)));
     Ok(run_changes(
         changes,
         args.dry_run,
@@ -605,6 +689,7 @@ pub fn delete(args: ChangeArgs) -> Result<i32> {
     let only = pick(&cfg, &args.agent)?;
     let plan = Plan::build(&cfg);
     let mut changes = plan.undos(only);
+    changes.extend(Houses::build(&cfg).undos(only));
     // Without `-a` it takes back everything, each project's CANON.md wiring
     // included, which is what `--help` promises.
     if only.is_none() {
@@ -835,7 +920,7 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
         .agents
         .iter()
         .filter(|a| a.active())
-        .map(|a| a.rules.clone())
+        .flat_map(|a| [a.rules.clone(), a.home.join(plan::CANON_FILE)])
         .collect();
     for p in &Projects::build(cfg).list {
         for name in ["CLAUDE.md", "AGENTS.md", plan::CANON_FILE] {
@@ -873,6 +958,39 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
                     file: after(&file),
                     old: line.to_string(),
                     new,
+                });
+            }
+        }
+    }
+
+    // opencode's `instructions` name house files by absolute path.
+    for a in cfg.agents.iter().filter(|a| a.active()) {
+        let file = a.home.join("opencode.json");
+        let Some(list) = fs::read_to_string(&file)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("instructions")?.as_array().cloned())
+        else {
+            continue;
+        };
+        for old in list.iter().filter_map(|v| v.as_str()) {
+            if let Some(new) = under(std::path::Path::new(old)) {
+                let new = new.to_string_lossy().into_owned();
+                out.push(Change::Batch {
+                    what: format!(
+                        "replace \"{old}\" with \"{new}\" in `instructions` in {}",
+                        tilde(&file)
+                    ),
+                    changes: vec![
+                        Change::JsonUninstruction {
+                            file: after(&file),
+                            value: old.to_string(),
+                        },
+                        Change::JsonInstruction {
+                            file: after(&file),
+                            value: new,
+                        },
+                    ],
                 });
             }
         }

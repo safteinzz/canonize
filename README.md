@@ -35,7 +35,7 @@ The first run asks which folder holds your rules, which file in it is your rules
 ![the agents tab: a card opened with Enter, a broken rules import fixed with f, the skills line linking them all](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/agents.gif)
 
 ```bash
-canon            # the dashboard: Agents, Skills and Projects tabs
+canon            # the dashboard: Agents, Skills and Houses tabs
 canon status     # the same, printed
 ```
 
@@ -69,26 +69,37 @@ canon adopt --all             # every skill every agent keeps itself
 canon adopt --all -n          # print what that would move, move nothing
 ```
 
-Enter works like in the projects tab: it links a missing skill, unlinks a linked one, or adopts an `own` one; `a` and `d` open a choice of this cell, every skill for this agent, or this skill for every agent. A skill an agent keeps itself shows as `own` in that agent's column. Adopting it moves the whole folder, SKILL.md and scripts, into your canon and leaves a link in its place, so the agent sees no difference. `F` never adopts: moving your files is always one at a time. `d` on an `own` skill also offers to delete the folder itself, and `d` on a skill of your own canon offers to delete that, every agent's link to it included; both sit behind a red box that only unlocks once you type the skill's name, because nothing else has a copy. Folders without a SKILL.md, like the one Claude fills with the skills it syncs, are not skills and get no row, wherever they sit: one inside your canon is named by `canon validate` for what it is, with the skills it holds (`skills/synced: not a skill but a folder holding 2 (docx, pptx)`).
+Enter works like in the houses tab: it links a missing skill, unlinks a linked one, or adopts an `own` one; `a` and `d` open a choice of this cell, every skill for this agent, or this skill for every agent. A skill an agent keeps itself shows as `own` in that agent's column. Adopting it moves the whole folder, SKILL.md and scripts, into your canon and leaves a link in its place, so the agent sees no difference. `F` never adopts: moving your files is always one at a time. `d` on an `own` skill also offers to delete the folder itself, and `d` on a skill of your own canon offers to delete that, every agent's link to it included; both sit behind a red box that only unlocks once you type the skill's name, because nothing else has a copy. Folders without a SKILL.md, like the one Claude fills with the skills it syncs, are not skills and get no row, wherever they sit: one inside your canon is named by `canon validate` for what it is, with the skills it holds (`skills/synced: not a skill but a folder holding 2 (docx, pptx)`).
 
-## See which project imports which house file
+## Choose who reads which house file
 
 ![the projects tab: a broken import repointed with Enter, then one house file added to every project with a](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/projects.gif)
 
 ```bash
-canon            # tab switches to projects: a row per project, a column per house file
-canon status     # prints the projects table under the agents one
+canon            # tab switches to houses: a column per house file, a row per agent and per project
+canon status     # prints the same table under the agents one
 ```
 
-Tell canonize where your projects live (`projects = ["~/dev"]`, which setup asks for) and it finds every project with a `CLAUDE.md` or `AGENTS.md` up to three levels down. Each cell says whether that project imports that house file. Enter works like a checkbox: it adds or repoints an import, or removes one that is there. `a` and `d` open a choice of how far to go: this project, every house file in this project, or this house file in every project, each with how many changes it makes; `o` opens the project's `CLAUDE.md`. When your canon moves, every import of a house file that is gone shows as broken and `F` (or `canon fix`) repoints them all at once. An import naming a file that exists nowhere is listed under the project.
+A house file either fits a project (how your Rust crates ship) or fits an agent wherever it runs (that it is on WSL, how to reach your GitLab). The **Houses** tab has both: the rows under `every repo` are your agents, and one imported there is read by that agent in every repo; the rows under `projects` are the projects canonize found. Enter works like a checkbox: it adds or repoints an import, or removes one that is there. `a` and `d` open a choice of how far to go: this cell, every house file in this row, or this house file in every agent or every project, each with how many changes it makes; `o` opens the file the import sits in. When your canon moves, every import of a house file that is gone shows as broken and `F` (or `canon fix`) repoints them all at once. `canon fix` never adds one: who reads which house file is only ever what you chose.
 
-### Where a project's house imports live
+Tell canonize where your projects live (`projects = ["~/dev"]`, which setup asks for) and it finds every project with a `CLAUDE.md` or `AGENTS.md` up to three levels down. An import naming a file that exists nowhere is listed under the project.
+
+### Where the imports live
+
+An agent's own imports go where that agent reads them, and a house file you already import in `~/.claude/CLAUDE.md` by hand shows as `imported`:
+
+```
+Claude     an `@` line in ~/.claude/CLAUDE.md, beside your rules
+pi         an `@` line in ~/.pi/agent/CANON.md, which canonize's extension loads
+opencode   the file's path in "instructions" in ~/.config/opencode/opencode.json
+Codex      cannot load another file, so it gets no house files
+```
 
 Each project keeps its house imports in its own `CANON.md`, gitignored and written only by canonize, so your personal paths never land in a tracked file and your own `CLAUDE.md` and `AGENTS.md` lines are never touched. Every agent loads it its own way:
 
 ```
 Claude     one `@CANON.md` line in the project's CLAUDE.md
-pi         an extension canonize writes to ~/.pi/agent/extensions/canonize.ts
+pi         the same extension, written to ~/.pi/agent/extensions/canonize.ts
 opencode   "instructions": ["CANON.md"] in ~/.config/opencode/opencode.json
 Codex      cannot load another file, so it gets no house files
 ```
@@ -160,7 +171,7 @@ Each tab's own keys are on its bottom bar, and `?` lists them all.
 
 ## Driving it from a script
 
-Nothing in the CLI ever prompts, so an agent can do the whole job: `canon setup`, then `canon status --json` to see what is wrong, `canon fix` to wire it, `canon adopt --all` to bring in what the agents kept to themselves, and `canon status --strict` to be sure nothing is left. `--json` on `status` and `validate` prints absolute paths and these state names, which do not change with the wording of the tables: `linked`, `unwired`, `broken`, `foreign`, `own`, `na`, `off`, `absent`. Each entry under `unsettled` carries the advice that `canon status` prints for it.
+Nothing in the CLI ever prompts, so an agent can do the whole job: `canon setup`, then `canon status --json` to see what is wrong, `canon fix` to wire it, `canon adopt --all` to bring in what the agents kept to themselves, and `canon status --strict` to be sure nothing is left. `--json` on `status` and `validate` prints absolute paths and these state names, which do not change with the wording of the tables: `linked`, `unwired`, `broken`, `foreign`, `own`, `na`, `off`, `absent`, and under `houses` a cell is `imported` or `none` where the tables say `-`. Each entry under `unsettled` carries the advice that `canon status` prints for it.
 
 ## Where it keeps things
 
@@ -170,7 +181,7 @@ Your canon is `$CANONIZE_SOURCE`, else your config folder: `~/.config/canonize` 
 canonize.toml        which agents, and how each is wired (all optional)
 rules.yaml           the rules every agent follows (any format; `""` for none)
 rules.schema.json    the shape `canon validate` holds them to
-house/*.md           house rules, imported by the projects they fit
+house/*.md           house rules, imported by the projects or agents they fit
 skills/<name>/       one folder per skill, with its SKILL.md
 ```
 
