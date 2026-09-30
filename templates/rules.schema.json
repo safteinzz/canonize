@@ -2,19 +2,109 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Rules file",
   "type": "object",
-  "required": ["title", "format", "sections"],
+  "required": [
+    "title",
+    "format",
+    "sections"
+  ],
   "properties": {
-    "title": { "type": "string" },
-    "intro": { "$ref": "#/$defs/lines" },
-    "format": { "type": "object", "required": ["keys", "reading", "writing"] },
+    "title": {
+      "type": "string"
+    },
+    "intro": {
+      "$ref": "#/$defs/lines"
+    },
+    "format": {
+      "type": "object",
+      "required": [
+        "keys",
+        "reading",
+        "writing"
+      ],
+      "properties": {
+        "about": {
+          "type": "string"
+        },
+        "keys": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "reading": {
+          "$ref": "#/$defs/lines"
+        },
+        "writing": {
+          "$ref": "#/$defs/lines"
+        }
+      },
+      "additionalProperties": false
+    },
+    "about_this_file": {
+      "$ref": "#/$defs/rules"
+    },
     "sections": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["section", "rules"],
+        "required": [
+          "section",
+          "rules"
+        ],
         "properties": {
-          "section": { "type": "string" },
-          "rules": { "$ref": "#/$defs/rules" }
+          "section": {
+            "type": "string"
+          },
+          "rules": {
+            "$ref": "#/$defs/rules"
+          },
+          "example": {
+            "type": "object",
+            "required": [
+              "intro"
+            ],
+            "properties": {
+              "intro": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "shorthand": {
+            "type": "object",
+            "required": [
+              "intro",
+              "entries"
+            ],
+            "properties": {
+              "intro": {
+                "type": "string"
+              },
+              "entries": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": [
+                    "i_write",
+                    "it_means"
+                  ],
+                  "properties": {
+                    "i_write": {
+                      "type": "string"
+                    },
+                    "it_means": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          }
         },
         "additionalProperties": false
       }
@@ -22,20 +112,60 @@
   },
   "additionalProperties": false,
   "$defs": {
-    "lines": { "type": "array", "items": { "type": "string" } },
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "rules": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "case", "check", "rule", "exceptions"],
+        "required": [
+          "name",
+          "case",
+          "check",
+          "rule",
+          "exceptions"
+        ],
         "properties": {
-          "name": { "type": "string" },
-          "case": { "type": ["string", "null"] },
-          "check": { "type": "array", "items": { "type": "string", "pattern": "\\?$" } },
-          "rule": { "type": "array", "minItems": 1, "items": { "type": "string", "pattern": "^[^?]*$" } },
-          "why": { "type": "string" },
-          "examples": { "type": "object", "additionalProperties": { "type": "string" } },
-          "exceptions": { "$ref": "#/$defs/lines" }
+          "name": {
+            "type": "string"
+          },
+          "case": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "check": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "\\?$"
+            }
+          },
+          "rule": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^[^?]*$"
+            }
+          },
+          "why": {
+            "type": "string"
+          },
+          "examples": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "exceptions": {
+            "$ref": "#/$defs/lines"
+          }
         },
         "additionalProperties": false
       }
