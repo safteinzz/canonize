@@ -98,13 +98,15 @@ Codex      cannot load another file, so it gets no house files
 Each project keeps its house imports in its own `CANON.md`, gitignored and written only by canonize, so your personal paths never land in a tracked file and your own `CLAUDE.md` and `AGENTS.md` lines are never touched. Every agent loads it its own way:
 
 ```
-Claude     one `@CANON.md` line in the project's CLAUDE.md
+Claude     `@CANON.md` in the project's CLAUDE.local.md, which is gitignored too
 pi         the same extension, written to ~/.pi/agent/extensions/canonize.ts
 opencode   "instructions": ["CANON.md"] in ~/.config/opencode/opencode.json
 Codex      cannot load another file, so it gets no house files
 ```
 
-The `reads CANON.md` row of the agents tab shows which agents are wired. House imports still sitting in a project's CLAUDE.md or AGENTS.md show as broken, and a fix moves them into CANON.md, adds `CANON.md` to the project's `.gitignore` and `@CANON.md` to its CLAUDE.md.
+The `reads CANON.md` row of the agents tab shows which agents are wired. House imports still sitting in a project's CLAUDE.md or AGENTS.md show as broken, and a fix moves them into CANON.md, adds `CANON.md` and `CLAUDE.local.md` to the project's `.gitignore`, and writes `@CANON.md` into its CLAUDE.local.md. Claude reads AGENTS.md on its own only while a project has neither CLAUDE.md nor CLAUDE.local.md, so in a project with just AGENTS.md the CLAUDE.local.md imports it as well. A `@CANON.md` line in CLAUDE.md, where canonize 0.2.0 put it, moves to CLAUDE.local.md on the next fix, because CLAUDE.md is often tracked.
+
+Your house files live outside the project, and Claude loads files from outside a project only after you allow it there: the first time you open `claude` in a project, say yes to its question about external imports. Until you do, `canon status` lists the project under `needs you`. A CLAUDE.local.md you track in git, or keep as a link, is left alone, and `canon status` says so.
 
 ## Move your canon
 
@@ -171,7 +173,7 @@ Each tab's own keys are on its bottom bar, and `?` lists them all.
 
 ## Driving it from a script
 
-Nothing in the CLI ever prompts, so an agent can do the whole job: `canon setup`, then `canon status --json` to see what is wrong, `canon fix` to wire it, `canon adopt --all` to bring in what the agents kept to themselves, and `canon status --strict` to be sure nothing is left. `--json` on `status` and `validate` prints absolute paths and these state names, which do not change with the wording of the tables: `linked`, `unwired`, `broken`, `foreign`, `own`, `na`, `off`, `absent`, and under `houses` a cell is `imported` or `none` where the tables say `-`. Each entry under `unsettled` carries the advice that `canon status` prints for it.
+Nothing in the CLI ever prompts, so an agent can do the whole job: `canon setup`, then `canon status --json` to see what is wrong, `canon fix` to wire it, `canon adopt --all` to bring in what the agents kept to themselves, and `canon status --strict` to be sure nothing is left. The one step only a person can take is Claude's own question about external imports, asked the first time `claude` opens in a project, and `--strict` counts a project until it is answered. `--json` on `status` and `validate` prints absolute paths and these state names, which do not change with the wording of the tables: `linked`, `unwired`, `broken`, `foreign`, `own`, `na`, `off`, `absent`, and under `houses` a cell is `imported` or `none` where the tables say `-`. A project's `claude` is `approved`, `not_asked` or `declined`, whether Claude may load its house files. Each entry under `unsettled` carries the advice that `canon status` prints for it.
 
 ## Where it keeps things
 

@@ -238,7 +238,7 @@ fn render_agents(f: &mut Frame, area: Rect, app: &App) {
                     };
                     let note = match &plan.rows[*r] {
                         plan::Row::Rules(_) => tilde(&cell.at),
-                        _ if per_project => "through each project's CLAUDE.md".to_string(),
+                        _ if per_project => "through each project's CLAUDE.local.md".to_string(),
                         _ if cell.state == State::Na => "cannot load another file".to_string(),
                         _ => tilde(&cell.at),
                     };
@@ -524,7 +524,7 @@ fn detail(app: &App, row: Option<usize>, col: usize) -> Option<Pane> {
             RulesMode::Off => "off".into(),
         },
         plan::Row::Loader => match agent.name.as_str() {
-            "claude" => "per project: `@CANON.md` in its CLAUDE.md (houses tab)".into(),
+            "claude" => "per project: `@CANON.md` in its CLAUDE.local.md (houses tab)".into(),
             "pi" => "an extension that loads ./CANON.md".into(),
             "opencode" => "`\"instructions\": [\"CANON.md\"]` in opencode.json".into(),
             _ => "this agent has no way to load another file".into(),
@@ -833,6 +833,16 @@ fn project_detail(app: &App, prow: usize, pcol: usize) -> Option<Pane> {
         lines.push(Line::from(vec![
             Span::styled(format!("{}: ", w.what), dim),
             Span::styled(text, state_style(&w.state)),
+        ]));
+    }
+    if let Some(a) = x.claude {
+        let (text, style) = match a.advice(cfg, x) {
+            None => ("yes".to_string(), state_style(&State::Linked)),
+            Some(advice) => (format!("no · {advice}"), Style::default().fg(Color::Yellow)),
+        };
+        lines.push(Line::from(vec![
+            Span::styled("Claude allowed to load them: ", dim),
+            Span::styled(text, style),
         ]));
     }
     for d in &x.dead {

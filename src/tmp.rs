@@ -111,13 +111,15 @@ pub fn claude(home: &Path) -> Agent {
 pub fn config(source: Source, agents: Vec<Agent>, projects: Vec<PathBuf>) -> Config {
     let path = source.root.join(crate::config::CONFIG_FILE);
     let shortcut = source.root.join(".shortcut-that-is-not-there");
+    let claude_state = source.root.join(".claude-state-that-is-not-there.json");
     Config {
         source,
         agents,
         projects,
         path,
-        // A test never reads the real one: `~/.config/canonize` is a real path
-        // on the machine running the suite.
+        // A test never reads the real ones: `~/.config/canonize` and
+        // `~/.claude.json` are real paths on the machine running the suite.
         shortcut,
+        claude_state,
     }
 }

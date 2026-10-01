@@ -18,7 +18,7 @@ pub struct AgentArgs {
     /// Only this agent (as named in `canon status`)
     #[arg(short, long, value_name = "NAME")]
     pub agent: Option<String>,
-    /// Also exit 1 when something needs a person (foreign, own)
+    /// Also exit 1 when something needs a person (foreign, own, waiting on Claude)
     #[arg(long)]
     pub strict: bool,
     /// Print it as JSON for a script or an agent
@@ -179,7 +179,13 @@ pub fn status(args: AgentArgs) -> Result<i32> {
     // printed either, so a gate on one agent is about that agent alone.
     let unfixed =
         plan.drifted(only) || houses.drifted(only) || (only.is_none() && projects.drifted());
-    let code = i32::from(unfixed || (args.strict && !unsettled.is_empty()));
+    let unapproved = if only.is_none() {
+        projects.unapproved()
+    } else {
+        Vec::new()
+    };
+    let code =
+        i32::from(unfixed || (args.strict && (!unsettled.is_empty() || !unapproved.is_empty())));
     if args.json {
         out!(
             "{}",
@@ -295,6 +301,11 @@ pub fn status(args: AgentArgs) -> Result<i32> {
     needs.extend(
         writes_into_canon(&cfg, only)
             .map(|(names, advice)| (format!("{} skills", names.join(", ")), advice)),
+    );
+    needs.extend(
+        unapproved
+            .iter()
+            .filter_map(|(p, a)| Some((projects::short(&cfg, &p.root), a.advice(&cfg, p)?))),
     );
     if !needs.is_empty() {
         out!();
@@ -470,7 +481,7 @@ fn status_json(
             let wiring: Vec<Value> = p
                 .wiring
                 .iter()
-                .map(|w| json!({ "what": w.what, "state": w.state.id() }))
+                .map(|w| json!({ "what": w.what, "state": w.state.id(), "why": w.state.why() }))
                 .collect();
             json!({
                 "path": p.root,
@@ -478,10 +489,11 @@ fn status_json(
                 "house": house,
                 "wiring": wiring,
                 "dead": p.dead,
+                "claude": p.claude.map(projects::Approval::id),
             })
         })
         .collect();
-    let unsettled: Vec<Value> = plan
+    let mut unsettled: Vec<Value> = plan
         .unsettled(only)
         .into_iter()
         .map(|(r, a)| {
@@ -495,6 +507,18 @@ fn status_json(
             })
         })
         .collect();
+    if only.is_none() {
+        unsettled.extend(projects.unapproved().into_iter().map(|(p, a)| {
+            json!({
+                "agent": "claude",
+                "kind": "project",
+                "name": p.root,
+                "state": a.id(),
+                "why": null,
+                "advice": a.advice(cfg, p),
+            })
+        }));
+    }
     json!({
         "canon": cfg.source.root,
         "config": cfg.path,
@@ -623,6 +647,12 @@ fn print_projects(cfg: &Config, p: &Projects, label_w: usize, notes: &mut Vec<St
             }
         }
         if x.uses_canon() {
+            for why in x.wiring.iter().filter_map(|w| match &w.state {
+                State::Foreign(why) => Some(why),
+                _ => None,
+            }) {
+                notes.push(format!("{}: {why}", projects::short(cfg, &x.root)));
+            }
             for c in x.wiring_changes() {
                 notes.push(format!(
                     "{}: {}",

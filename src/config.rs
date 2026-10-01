@@ -77,6 +77,9 @@ pub struct Config {
     /// The folder `canon` looks in, which is a link to the source when the
     /// source lives somewhere else.
     pub shortcut: PathBuf,
+    /// Claude Code's own state file, where it records which projects may load
+    /// files outside themselves. Read, never written.
+    pub claude_state: PathBuf,
 }
 
 #[derive(Deserialize, Default)]
@@ -264,7 +267,17 @@ fn build(root: &Path, raw: RawConfig, path: PathBuf) -> Result<Config> {
         projects: raw.projects.iter().map(|p| expand(p)).collect(),
         path,
         shortcut: source_dir(),
+        claude_state: claude_state(),
     })
+}
+
+/// `.claude.json` in `$CLAUDE_CONFIG_DIR` when Claude Code is told to use one,
+/// else in the home folder.
+fn claude_state() -> PathBuf {
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) if !dir.is_empty() => expand(&dir.to_string_lossy()).join(".claude.json"),
+        _ => home().join(".claude.json"),
+    }
 }
 
 pub fn home() -> PathBuf {

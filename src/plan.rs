@@ -347,7 +347,7 @@ impl Change {
             Change::Evict { from, to } | Change::Rename { from, to } => {
                 format!("mv {} {}", tilde(from), tilde(to))
             }
-            Change::AddImport { file, line } if is_canon_file(file) => {
+            Change::AddImport { file, line } if is_canon_file(file) || is_local_file(file) => {
                 format!("echo '{line}' >> {}", tilde(file))
             }
             Change::AddImport { file, line } => {
@@ -397,9 +397,19 @@ impl Change {
                 }
                 fs::remove_dir_all(at).with_context(|| format!("could not delete `{}`", tilde(at)))
             }
+            Change::MoveImport { to, .. }
+                if fs::symlink_metadata(to).is_ok_and(|m| m.file_type().is_symlink()) =>
+            {
+                bail!(
+                    "`{}` is a link, so an import written there would land in the file it points at",
+                    tilde(to)
+                )
+            }
+            // Written before it is taken out, so a failure leaves the line twice
+            // rather than nowhere.
             Change::MoveImport { from, old, to, new } => {
-                edit_lines(from, |l| (l.trim() != old).then(|| l.to_string()))?;
-                append_import(to, new)
+                append_import(to, new)?;
+                edit_lines(from, |l| (l.trim() != old).then(|| l.to_string()))
             }
             Change::WriteFile { file, body, .. } => {
                 if file.exists() {
@@ -462,6 +472,7 @@ impl Change {
                     tilde(file)
                 )
             }
+            Change::AddImport { file, line } if is_local_file(file) => append_import(file, line),
             Change::AddImport { file, line } => {
                 let old = read_text(file)?.unwrap_or_default();
                 if let Some(parent) = file.parent() {
@@ -492,6 +503,14 @@ impl Change {
                     fs::remove_file(file)
                         .with_context(|| format!("could not remove `{}`", tilde(file)))?;
                 }
+                // A CLAUDE.local.md is deleted only when nothing but canonize's
+                // header is left, because one the user wrote is theirs.
+                if is_local_file(file)
+                    && fs::read_to_string(file).is_ok_and(|t| t.trim() == LOCAL_HEADER.trim())
+                {
+                    fs::remove_file(file)
+                        .with_context(|| format!("could not remove `{}`", tilde(file)))?;
+                }
                 Ok(())
             }
         }
@@ -503,11 +522,23 @@ pub const CANON_FILE: &str = "CANON.md";
 
 const CANON_HEADER: &str = "# CANON.md: written by canonize, not tracked. `canon` edits it.\n";
 
+/// The file Claude reads a project's CANON.md through: Claude Code loads it
+/// beside CLAUDE.md as the user's own, so nothing tracked has to name CANON.md.
+pub const LOCAL_FILE: &str = "CLAUDE.local.md";
+
+/// An HTML comment, because Claude Code strips those before the file reaches
+/// the model.
+pub const LOCAL_HEADER: &str =
+    "<!-- CLAUDE.local.md: written by canonize, not tracked. `canon` edits it. -->\n";
+
 fn is_canon_file(file: &Path) -> bool {
     file.file_name().is_some_and(|n| n == CANON_FILE)
 }
 
-/// Add an import at the end of a file, starting a CANON.md with its header.
+fn is_local_file(file: &Path) -> bool {
+    file.file_name().is_some_and(|n| n == LOCAL_FILE)
+}
+
 /// A file's text, or nothing when it is not there. A file that is not UTF-8 is
 /// an error rather than an empty string, because writing an empty string back
 /// would replace everything in it.
@@ -534,10 +565,15 @@ fn not_text(file: &Path) -> String {
     )
 }
 
+/// Add an import at the end of a file, starting a CANON.md or CLAUDE.local.md
+/// with its header.
 fn append_import(file: &Path, line: &str) -> Result<()> {
     let mut text = read_text(file)?.unwrap_or_default();
     if text.is_empty() && is_canon_file(file) {
         text.push_str(CANON_HEADER);
+    }
+    if text.is_empty() && is_local_file(file) {
+        text.push_str(LOCAL_HEADER);
     }
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
@@ -855,7 +891,7 @@ pub fn pi_extension(agent: &Agent) -> (PathBuf, String) {
 }
 
 /// Whether the agent will read a project's CANON.md. Claude does it through
-/// the project's own CLAUDE.md, which the houses tab wires; pi through an
+/// the project's CLAUDE.local.md, which the houses tab wires; pi through an
 /// extension canonize writes; opencode through its `instructions` setting;
 /// anything else has no way to.
 fn loader_cell(agent: &Agent) -> Cell {

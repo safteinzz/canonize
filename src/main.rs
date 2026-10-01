@@ -58,9 +58,13 @@ const AFTER: &str = concat!(
 
 \x1b[1mCANON.md:\x1b[0m
   Each project keeps its house imports in its own CANON.md, written only by
-  canonize and kept out of git. Claude loads it from one `@CANON.md` line in the
-  project's CLAUDE.md, pi from an extension and opencode from a setting, both
-  wired by `fix`. Codex cannot load another file, so it gets no house files.
+  canonize and kept out of git. Claude loads it from `@CANON.md` in the
+  project's CLAUDE.local.md, also kept out of git, which imports AGENTS.md too
+  when there is no CLAUDE.md; pi loads it from an extension and opencode from a
+  setting, all wired by `fix`. Codex cannot load another file, so it gets no
+  house files. Claude reads them only once you open it in the project and allow
+  external imports: `status` names each project still waiting, and `--json`
+  says `approved`, `not_asked` or `declined` under the project's `claude`.
 
 \x1b[1mHouses:\x1b[0m
   A house file an agent reads in every repo: an `@` line in Claude's CLAUDE.md,
@@ -71,13 +75,14 @@ const AFTER: &str = concat!(
 Your canon is `$CANONIZE_SOURCE`, else your config folder (~/.config/canonize,
 and ~/Library/Application Support/canonize on macOS), and holds canonize.toml.
 `status` and `validate` print for people and exit 1 when something needs fixing;
-`status --strict` counts foreign and own too, `--json` on either prints it for a
-script, with those state names (`na`, `absent`) and absolute paths. `fix` never
-settles a foreign or own cell, so `status` ends by naming them and what to do,
-and what `validate` reports is yours to edit. Every command that changes
-something takes `-n` (`--dry-run`), a dry run printing the very lines the real
-run would, and writing nothing; `self update` is the exception, since all it
-changes is canonize itself. Errors go to stderr, exit non-zero.
+`status --strict` counts foreign, own and those waiting projects too, `--json`
+on either prints it for a script, with those state names (`na`, `absent`) and
+absolute paths. `fix` never settles a foreign or own cell or a waiting project,
+so `status` ends by naming them and what to do, and what `validate` reports is
+yours to edit. Every command that changes something takes `-n` (`--dry-run`), a
+dry run printing the very lines the real run would, and writing nothing; `self
+update` is the exception, since all it changes is canonize itself. Errors go
+to stderr, exit non-zero.
 Run `canon <command> --help` for a command's details.",
     "\n\n",
     env!("CARGO_PKG_REPOSITORY"),
@@ -115,7 +120,7 @@ struct Cli {
 enum Cmd {
     /// Show which agent has which rules and skills, and what drifted
     ///   -a NAME   only this agent
-    ///   --strict  exit 1 when something needs a person too (foreign, own)
+    ///   --strict  exit 1 when something needs a person too (foreign, own, waiting on Claude)
     ///   --json    print it for a script instead of a person
     #[command(verbatim_doc_comment)]
     Status(cli::AgentArgs),
