@@ -365,19 +365,18 @@ fn render_skills(f: &mut Frame, area: Rect, app: &App) {
     let table = Table::new(rows, widths)
         .header(Row::new(header).bottom_margin(1))
         .block(block);
-    render_grid(f, area, table, total, app.srow, &app.stop);
+    render_grid(f, area, table, 2, total, app.srow, &app.stop);
 }
-
-/// Rows the header of a grid takes: its line and the blank under it.
-const GRID_HEADER_H: u16 = 2;
 
 /// Draws a grid scrolled so the `selected` row is on screen, starting from
 /// `top` and writing back where it ended up, with a scrollbar on the right
-/// border whenever some of the `total` rows are out of sight.
+/// border whenever some of the `total` rows are out of sight. `header_h` is
+/// the rows the table's header takes, its margin included.
 fn render_grid(
     f: &mut Frame,
     area: Rect,
     table: Table,
+    header_h: u16,
     total: usize,
     selected: usize,
     top: &Kept<usize>,
@@ -387,7 +386,7 @@ fn render_grid(
         .with_selected(Some(selected));
     f.render_stateful_widget(table, area, &mut state);
     top.set(state.offset());
-    let viewport = area.height.saturating_sub(2 + GRID_HEADER_H) as usize;
+    let viewport = area.height.saturating_sub(2 + header_h) as usize;
     if total <= viewport {
         return;
     }
@@ -397,7 +396,7 @@ fn render_grid(
             .begin_symbol(None)
             .end_symbol(None),
         Rect {
-            y: area.y + 1 + GRID_HEADER_H,
+            y: area.y + 1 + header_h,
             height: viewport as u16,
             ..area
         },
@@ -657,6 +656,8 @@ fn render_houses(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(para, area);
         return;
     }
+    // The agents' section title sits on the header row, as in `canon status`.
+    let title = "every project";
     let names: Vec<String> = cfg
         .agents
         .iter()
@@ -672,8 +673,8 @@ fn render_houses(f: &mut Frame, area: Rect, app: &App) {
         .map(|n| n.chars().count())
         .max()
         .unwrap_or(0)
-        .max(12) as u16;
-    let mut header = vec![Cell::from("")];
+        .max(title.chars().count() + 1) as u16;
+    let mut header = vec![Cell::from(title).style(dim)];
     let mut widths = vec![Constraint::Length(label_w + 1)];
     for house in &h.house {
         let label = crate::cli::house_label(house);
@@ -681,7 +682,7 @@ fn render_houses(f: &mut Frame, area: Rect, app: &App) {
         header.push(Cell::from(label).style(Style::default().add_modifier(Modifier::BOLD)));
     }
     let section = |text: &str| Row::new(vec![Cell::from(text.to_string()).style(dim)]);
-    let mut rows = vec![section("every project")];
+    let mut rows = Vec::new();
     // The display row of the selection, past the section lines above it.
     let mut selected = 0;
     for (r, name) in names.iter().enumerate() {
@@ -733,9 +734,9 @@ fn render_houses(f: &mut Frame, area: Rect, app: &App) {
     }
     let total = rows.len();
     let table = Table::new(rows, widths)
-        .header(Row::new(header).bottom_margin(1))
+        .header(Row::new(header))
         .block(block);
-    render_grid(f, area, table, total, selected, &app.ptop);
+    render_grid(f, area, table, 1, total, selected, &app.ptop);
 }
 
 /// Agent `a`'s import of house file `col` spelled out.
