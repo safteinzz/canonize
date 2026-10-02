@@ -44,7 +44,7 @@ pub(super) enum CardLine {
     Skills,
 }
 
-/// A row of the houses tab: an agent, for every repo, or one project.
+/// A row of the houses tab: an agent, for every project, or one project.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum HouseRow {
     Agent(usize),
@@ -79,7 +79,7 @@ pub(super) struct App {
     /// The selected skill in the skills tab, an index into `Plan::skill_rows`.
     pub(super) srow: usize,
     /// The selected row and house file in the houses tab: agents first, each
-    /// for every repo, then the projects (`house_row`).
+    /// for every project, then the projects (`house_row`).
     pub(super) prow: usize,
     pub(super) pcol: usize,
     /// The first row each grid shows, kept between frames so moving back up
@@ -974,7 +974,7 @@ impl App {
         let to = if remove { "from" } else { "to" };
         let mut items = vec![
             (
-                format!("{file} {to} {agent}, in every repo"),
+                format!("{file} {to} {agent}, in every project"),
                 plan::dedup(pick(&row[a]).into_iter()),
             ),
             (
@@ -1143,7 +1143,7 @@ impl App {
                 };
                 Confirm::offer(
                     &verb.to_lowercase(),
-                    format!("{verb} {file} for {agent}, in every repo?"),
+                    format!("{verb} {file} for {agent}, in every project?"),
                     Action::Changes(vec![change]),
                 )
             } else {

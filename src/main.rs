@@ -67,10 +67,10 @@ const AFTER: &str = concat!(
   says `approved`, `not_asked` or `declined` under the project's `claude`.
 
 \x1b[1mHouses:\x1b[0m
-  A house file an agent reads in every repo: an `@` line in Claude's CLAUDE.md,
+  A house file an agent reads in every project: an `@` line in Claude's CLAUDE.md,
   one in pi's own ~/.pi/agent/CANON.md, or a path in opencode's `instructions`.
   `fix` repoints and `delete` takes back; adding one is in the TUI's Houses tab,
-  whose rows are every agent (for every repo), then every project.
+  whose rows are every agent (for every project), then each project.
 
 Your canon is `$CANONIZE_SOURCE`, else your config folder (~/.config/canonize,
 and ~/Library/Application Support/canonize on macOS), and holds canonize.toml.

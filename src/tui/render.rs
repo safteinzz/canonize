@@ -625,7 +625,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The help, as one body for the reader box that `?` opens.
-pub(super) const HELP: &str = "canonize: one source of truth for your coding agents\n\n\nAgents   j/k agent · ↵ open its card · esc back to the list\n         in the card: f fix the line · d delete it\n         F fix every agent's setup · D delete it all\nSkills   j/k skill · h/l agent · ↵ toggle (link, unlink, or adopt an own one)\n         a link… · d delete… (this cell, row or column; an own skill itself)\n         F link every missing skill · D delete every skill link\nHouses   j/k agent or project · h/l house file · ↵ toggle an import\n         an agent's row: it reads the file in every repo\n         a add… · d delete… (this cell, row or column)\n         F fix broken imports and CANON.md wiring · D delete all\n         o open the file the import sits in\nAnywhere tab switch · v validate your canon · e edit canonize.toml\n         r reload · ? help · q quit\n\nlinked   wired to your canon\nimported a house file is read there\nunwired  f wires it\nbroken   wired to the wrong thing; f repoints it\nforeign  something of yours or the agent's; left alone\nn/a      the agent has no way to use it\noff, -   turned off, or the agent is not installed\nown      a skill the agent keeps itself; f adopts it into your canon\n";
+pub(super) const HELP: &str = "canonize: one source of truth for your coding agents\n\n\nAgents   j/k agent · ↵ open its card · esc back to the list\n         in the card: f fix the line · d delete it\n         F fix every agent's setup · D delete it all\nSkills   j/k skill · h/l agent · ↵ toggle (link, unlink, or adopt an own one)\n         a link… · d delete… (this cell, row or column; an own skill itself)\n         F link every missing skill · D delete every skill link\nHouses   j/k agent or project · h/l house file · ↵ toggle an import\n         an agent's row: it reads the file in every project\n         a add… · d delete… (this cell, row or column)\n         F fix broken imports and CANON.md wiring · D delete all\n         o open the file the import sits in\nAnywhere tab switch · v validate your canon · e edit canonize.toml\n         r reload · ? help · q quit\n\nlinked   wired to your canon\nimported a house file is read there\nunwired  f wires it\nbroken   wired to the wrong thing; f repoints it\nforeign  something of yours or the agent's; left alone\nn/a      the agent has no way to use it\noff, -   turned off, or the agent is not installed\nown      a skill the agent keeps itself; f adopts it into your canon\n";
 
 /// A house cell's word: `imported` for one that is wired, `-` for one that
 /// is not, since neither needs fixing.
@@ -638,7 +638,7 @@ fn house_word(s: &State) -> &'static str {
 }
 
 /// The houses tab: a column per house file, and a row per place one can be
-/// imported, every agent (for every repo) above every project.
+/// imported, every agent (for every project) above every project.
 fn render_houses(f: &mut Frame, area: Rect, app: &App) {
     let (Some(cfg), Some(h), Some(p)) = (&app.cfg, &app.houses, &app.projects) else {
         return;
@@ -649,7 +649,7 @@ fn render_houses(f: &mut Frame, area: Rect, app: &App) {
     let dim = Style::default().add_modifier(Modifier::DIM);
     if h.house.is_empty() {
         let para = Paragraph::new(
-            "No house files yet: put a HOUSE-<NAME>.md in your canon's house/, then import it here into an agent, for every repo, or into a project.",
+            "No house files yet: put a HOUSE-<NAME>.md in your canon's house/, then import it here into an agent, for every project, or into a project.",
         )
         .style(dim)
         .block(block)
@@ -681,7 +681,7 @@ fn render_houses(f: &mut Frame, area: Rect, app: &App) {
         header.push(Cell::from(label).style(Style::default().add_modifier(Modifier::BOLD)));
     }
     let section = |text: &str| Row::new(vec![Cell::from(text.to_string()).style(dim)]);
-    let mut rows = vec![section("every repo")];
+    let mut rows = vec![section("every project")];
     // The display row of the selection, past the section lines above it.
     let mut selected = 0;
     for (r, name) in names.iter().enumerate() {

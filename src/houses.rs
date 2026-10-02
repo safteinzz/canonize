@@ -1,4 +1,4 @@
-//! House files an agent reads in every repo, wired into the agent's own setup
+//! House files an agent reads in every project, wired into the agent's own setup
 //! rather than into a project's CANON.md.
 //!
 //! Each agent takes them its own way: an `@` line in its rules file when it

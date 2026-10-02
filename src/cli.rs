@@ -562,8 +562,11 @@ fn house_state(state: &State) -> &'static str {
     }
 }
 
+/// The houses table's title over the agents' rows.
+const EVERY_PROJECT: &str = "every project";
+
 /// Who reads which house file, as one table under the agents': each agent's
-/// row is for every repo. Printed only when the canon has house files.
+/// row is for every project. Printed only when the canon has house files.
 fn print_houses(
     cfg: &Config,
     h: &Houses,
@@ -586,7 +589,7 @@ fn print_houses(
         )
         .max()
         .unwrap_or(0)
-        .max(10);
+        .max(EVERY_PROJECT.len());
     // `dimmed` adds escape codes, so the padding is worked out on the bare word.
     let head = |title: &str| {
         let mut line = format!(
@@ -603,7 +606,7 @@ fn print_houses(
         }
         out!("{}", line.trim_end());
     };
-    head("every repo");
+    head(EVERY_PROJECT);
     for &i in cols {
         let name = &cfg.agents[i].name;
         let mut line = format!("{name:label_w$}");
