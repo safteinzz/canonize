@@ -99,8 +99,8 @@ impl Choice {
             }
         });
         out.push(match &self.house {
-            Some(h) => format!("Your house files are {h}."),
-            None => "You have no house files.".to_string(),
+            Some(h) => format!("Your conventions are {h}."),
+            None => "You have no conventions.".to_string(),
         });
         out.push(format!(
             "Your skills live in {}/.",
@@ -193,7 +193,9 @@ pub fn lost() -> Option<Lost> {
     for by in agents.map(config::expand) {
         for path in candidates(&by) {
             let name = path.file_name().map(|n| n.to_string_lossy().to_uppercase());
-            if path.exists() || name.is_none_or(|n| n.starts_with("HOUSE")) {
+            if path.exists()
+                || name.is_none_or(|n| n.starts_with("HOUSE") || n.starts_with("CONVENTIONS"))
+            {
                 continue;
             }
             let now = nearby(&path);
@@ -237,8 +239,9 @@ fn candidates(file: &Path) -> Vec<PathBuf> {
 
 pub fn around(rules: &Path, by: &Path) -> Option<Found> {
     let name = rules.file_name()?.to_string_lossy().into_owned();
-    // A house file imported globally names the folder, but it is not the rules.
-    if !rules.is_file() || name.to_uppercase().starts_with("HOUSE") {
+    // A convention imported globally names the folder, but it is not the rules.
+    let upper = name.to_uppercase();
+    if !rules.is_file() || upper.starts_with("HOUSE") || upper.starts_with("CONVENTIONS") {
         return None;
     }
     let root = rules.parent()?.to_path_buf();
@@ -257,13 +260,11 @@ pub fn around(rules: &Path, by: &Path) -> Option<Found> {
             schema: PathBuf::new(),
             house: pattern.to_string(),
             skills: PathBuf::new(),
+            mcp: PathBuf::new(),
         };
         !config::house_files(&probe).is_empty()
     };
-    let house = ["house/*.md", "HOUSE-*.md"]
-        .into_iter()
-        .find(|p| has(p))
-        .map(str::to_string);
+    let house = PATTERNS.into_iter().find(|p| has(p)).map(str::to_string);
     Some(Found {
         root,
         rules: rules.to_path_buf(),
@@ -314,6 +315,7 @@ pub fn rule_files(root: &Path) -> Vec<String> {
         let low = n.to_lowercase();
         (low.ends_with(".yaml") || low.ends_with(".yml") || low.ends_with(".md"))
             && !low.starts_with("house")
+            && !low.starts_with("conventions")
             && !low.starts_with("readme")
     })
 }
@@ -323,9 +325,17 @@ pub fn schema_files(root: &Path) -> Vec<String> {
     files(root, |n| n.to_lowercase().ends_with(".schema.json"))
 }
 
-/// The house patterns that match something in `root`, with how many files.
+/// Where conventions are found, the names before 0.3.0 last.
+const PATTERNS: [&str; 4] = [
+    "conventions/*.md",
+    "CONVENTIONS-*.md",
+    "house/*.md",
+    "HOUSE-*.md",
+];
+
+/// The convention patterns that match something in `root`, with how many files.
 pub fn house_patterns(root: &Path) -> Vec<(String, usize)> {
-    ["HOUSE-*.md", "house/*.md"]
+    PATTERNS
         .into_iter()
         .filter_map(|p| {
             let probe = config::Source {
@@ -334,6 +344,7 @@ pub fn house_patterns(root: &Path) -> Vec<(String, usize)> {
                 schema: PathBuf::new(),
                 house: p.to_string(),
                 skills: PathBuf::new(),
+                mcp: PathBuf::new(),
             };
             let n = config::house_files(&probe).len();
             (n > 0).then(|| (p.to_string(), n))

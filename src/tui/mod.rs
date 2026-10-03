@@ -4,8 +4,11 @@
 
 mod alert;
 mod confirm;
+mod line_edit;
+mod mcp;
 mod render;
 mod scope;
+mod server_form;
 mod typed;
 mod widgets;
 mod wizard;
@@ -13,6 +16,7 @@ mod wizard;
 use crate::check::{self, Report};
 use crate::config::{self, Config, tilde};
 use crate::houses::Houses;
+use crate::mcp::Mcps;
 use crate::plan::{self, Change, Plan, State};
 use crate::projects::{self, Projects};
 use crate::setup;
@@ -27,6 +31,8 @@ use crossterm::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use scope::{Picked, Scope};
+pub(crate) use server_form::Saved;
+use server_form::{Filled, ServerForm};
 use std::cell::Cell;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -56,6 +62,7 @@ pub(super) enum View {
     Agents,
     Skills,
     Houses,
+    Mcp,
 }
 
 /// How long a status message stays on screen before the hints return.
@@ -71,6 +78,7 @@ pub(super) struct App {
     pub(super) plan: Option<Plan>,
     pub(super) projects: Option<Projects>,
     pub(super) houses: Option<Houses>,
+    pub(super) mcps: Option<Mcps>,
     pub(super) view: View,
     /// The selected line of the agent's card in the agents tab.
     pub(super) aline: usize,
@@ -82,10 +90,14 @@ pub(super) struct App {
     /// for every project, then the projects (`house_row`).
     pub(super) prow: usize,
     pub(super) pcol: usize,
+    /// The MCP tab's selection, over the same rows as the houses tab.
+    pub(super) mrow: usize,
+    pub(super) mcol: usize,
     /// The first row each grid shows, kept between frames so moving back up
     /// scrolls only once the selection reaches the top.
     pub(super) stop: Cell<usize>,
     pub(super) ptop: Cell<usize>,
+    pub(super) mtop: Cell<usize>,
     pub(super) report: Option<Report>,
     pub(super) col: usize,
     pub(super) confirm: Option<Confirm>,
@@ -95,6 +107,8 @@ pub(super) struct App {
     pub(super) scope: Option<Scope>,
     /// The setup questions, while they are being answered.
     pub(super) wizard: Option<Wizard>,
+    /// A new MCP server being described, from the MCP tab's `n`.
+    pub(super) server_form: Option<ServerForm>,
     /// A box that is only read. It owns every key until closed.
     pub(super) note: Option<Note>,
     pub(super) status: String,
@@ -114,6 +128,7 @@ impl App {
             plan: None,
             projects: None,
             houses: None,
+            mcps: None,
             view: View::Agents,
             aline: 0,
             in_card: false,
@@ -122,12 +137,16 @@ impl App {
             stop: Cell::new(0),
             ptop: Cell::new(0),
             pcol: 0,
+            mrow: 0,
+            mcol: 0,
+            mtop: Cell::new(0),
             report: None,
             col: 0,
             confirm: None,
             typed: None,
             scope: None,
             wizard: None,
+            server_form: None,
             note: None,
             status: String::new(),
             status_failed: false,
@@ -153,7 +172,9 @@ impl App {
         match config::load() {
             Ok(cfg) => {
                 self.plan = Some(Plan::build(&cfg));
-                self.projects = Some(Projects::build(&cfg));
+                let projects = Projects::build(&cfg);
+                self.mcps = Some(Mcps::build(&cfg, &projects));
+                self.projects = Some(projects);
                 self.houses = Some(Houses::build(&cfg));
                 self.report = Some(check::run(&cfg.source));
                 self.cfg = Some(cfg);
@@ -164,6 +185,7 @@ impl App {
                 self.plan = None;
                 self.projects = None;
                 self.houses = None;
+                self.mcps = None;
                 self.report = None;
                 self.load_error = Some(format!("{e:#}"));
             }
@@ -184,6 +206,10 @@ impl App {
         self.prow = self.prow.min(self.house_rows().saturating_sub(1));
         if let Some(p) = &self.projects {
             self.pcol = self.pcol.min(p.house.len().saturating_sub(1));
+        }
+        self.mrow = self.mrow.min(self.house_rows().saturating_sub(1));
+        if let Some(m) = &self.mcps {
+            self.mcol = self.mcol.min(m.servers.len().saturating_sub(1));
         }
     }
 
@@ -238,6 +264,17 @@ impl App {
             }
             return None;
         }
+        if let Some(form) = &mut self.server_form {
+            match form.key(key) {
+                Filled::Pending => {}
+                Filled::Cancelled => {
+                    self.server_form = None;
+                    self.set_status("cancelled");
+                }
+                Filled::Done(saved) => self.save_server(saved),
+            }
+            return None;
+        }
         if let Some(c) = &mut self.confirm {
             match c.key(key) {
                 Answer::Pending => {}
@@ -286,9 +323,15 @@ impl App {
             self.view = match self.view {
                 View::Agents => View::Skills,
                 View::Skills => View::Houses,
-                View::Houses => View::Agents,
+                View::Houses => View::Mcp,
+                View::Mcp => View::Agents,
             };
             return None;
+        }
+        if self.view == View::Mcp
+            && let Some(edit) = self.mcp_key(key)
+        {
+            return edit;
         }
         if self.view == View::Houses {
             let rows = self.house_rows();
@@ -335,27 +378,6 @@ impl App {
                     self.open_scope(true);
                     return None;
                 }
-                Char('D') => {
-                    let mut changes: Vec<Change> = self
-                        .houses
-                        .as_ref()
-                        .map(|h| h.undos(None))
-                        .unwrap_or_default();
-                    changes.extend(
-                        self.projects
-                            .iter()
-                            .flat_map(|p| p.list.iter())
-                            .flat_map(|x| x.cells.iter())
-                            .filter_map(|c| c.undo.clone()),
-                    );
-                    self.confirm_scope(
-                        true,
-                        "Delete",
-                        "every house file from every agent and project",
-                        changes,
-                    );
-                    return None;
-                }
                 Char('o') => {
                     return match self.house_row()? {
                         HouseRow::Project(i) => self
@@ -392,7 +414,9 @@ impl App {
             }
         }
         // Keys only the agents tab has must not reach it from the houses tab.
-        if self.view == View::Houses && matches!(key.code, Char('f' | 'd' | 'D') | Enter) {
+        if matches!(self.view, View::Houses | View::Mcp)
+            && matches!(key.code, Char('f' | 'd') | Enter)
+        {
             return None;
         }
         let (_, agents) = self.size();
@@ -464,11 +488,9 @@ impl App {
             Char('f') | Enter => self.agent_cell(true),
             Char('F') => self.offer_fix_all(),
             Char('d') => self.agent_cell(false),
-            Char('D') if self.view == View::Skills => self.remove_skills_all(),
-            Char('D') if self.view == View::Agents => self.remove_agents_all(),
             Char('v') => self.show_check(),
             Char('s') if self.load_error.is_some() => self.propose_setup(),
-            Char('e') => {
+            Char('E') => {
                 return Some(Edit(match &self.cfg {
                     Some(c) => c.path.clone(),
                     None => config::source_dir().join(config::CONFIG_FILE),
@@ -519,8 +541,15 @@ impl App {
                         .map(|p| p.fixes())
                         .unwrap_or_default(),
                 );
-                (c, "every broken house import and CANON.md wiring")
+                (c, "every broken convention import and CANON.md wiring")
             }
+            View::Mcp => (
+                self.mcps
+                    .as_ref()
+                    .map(|m| m.fixes(None))
+                    .unwrap_or_default(),
+                "every MCP server that differs from your canon",
+            ),
         };
         if changes.is_empty() {
             self.set_status(format!("nothing to fix: {what} is up to date"));
@@ -534,28 +563,6 @@ impl App {
         let runs = Self::runs(&changes);
         self.confirm =
             Some(Confirm::offer("fix all", message, Action::Changes(changes)).runs(runs));
-    }
-
-    /// Every agent's setup canonize made (rules, CANON.md loader), behind one red gate.
-    fn remove_agents_all(&mut self) {
-        let Some(plan) = &self.plan else { return };
-        let changes: Vec<Change> = plan::dedup(
-            plan.setup_rows()
-                .into_iter()
-                .flat_map(|r| plan.cells[r].iter().filter_map(|c| c.undo.clone())),
-        );
-        if changes.is_empty() {
-            self.set_status("canonize has wired no agent's setup");
-            return;
-        }
-        let message = format!(
-            "Delete every agent's setup canonize made ({} change{})? Skills stay, and so does your canon.",
-            changes.len(),
-            if changes.len() == 1 { "" } else { "s" },
-        );
-        let runs = Self::runs(&changes);
-        self.confirm =
-            Some(Confirm::gate("delete all", message, Action::Changes(changes)).runs(runs));
     }
 
     /// The add or remove choices for the selected cell, nearest first: this
@@ -602,7 +609,7 @@ impl App {
                 plan::dedup(wired(x, pick(&x.cells[self.pcol]).into_iter().collect()).into_iter()),
             ),
             (
-                format!("every house file {to} {name}"),
+                format!("every convention {to} {name}"),
                 plan::dedup(wired(x, x.cells.iter().filter_map(pick).collect()).into_iter()),
             ),
             (
@@ -660,6 +667,7 @@ impl App {
                 message,
                 name,
                 input: String::new(),
+                back: 0,
                 changes,
             });
             return;
@@ -859,31 +867,6 @@ impl App {
         );
     }
 
-    /// Every skill link canonize made, for every agent, behind one red gate.
-    fn remove_skills_all(&mut self) {
-        let Some(plan) = &self.plan else { return };
-        let changes: Vec<Change> = plan::dedup(
-            plan.skill_rows()
-                .into_iter()
-                .flat_map(|r| plan.cells[r].iter().filter_map(|c| c.undo.clone()))
-                .filter(|u| !matches!(u, Change::DeleteDir { .. })),
-        );
-        if changes.is_empty() {
-            self.set_status("canonize made no skill links");
-            return;
-        }
-        let runs = Self::runs(&changes);
-        self.confirm = Some(
-            Confirm::gate(
-                "delete all",
-                "Delete every skill link canonize made, for every agent? Your canon stays."
-                    .to_string(),
-                Action::Changes(changes),
-            )
-            .runs(runs),
-        );
-    }
-
     /// Fix (`fix`) or take back (`!fix`) the selected cell.
     fn agent_cell(&mut self, fix: bool) {
         let Some(r) = self.selected_row() else {
@@ -919,6 +902,7 @@ impl App {
                 ),
                 name,
                 input: String::new(),
+                back: 0,
                 changes: vec![change],
             });
             return;
@@ -978,7 +962,7 @@ impl App {
                 plan::dedup(pick(&row[a]).into_iter()),
             ),
             (
-                format!("every house file {to} {agent}"),
+                format!("every convention {to} {agent}"),
                 plan::dedup(h.cells.iter().filter_map(|r| pick(&r[a]))),
             ),
             (
@@ -1007,17 +991,26 @@ impl App {
 
     /// Rows in the houses tab: every agent, then every project.
     pub(super) fn house_rows(&self) -> usize {
-        self.cfg.as_ref().map_or(0, |c| c.agents.len())
-            + self.projects.as_ref().map_or(0, |p| p.list.len())
+        self.grid_agents().len() + self.projects.as_ref().map_or(0, |p| p.list.len())
+    }
+
+    /// The agents the conventions and MCP tabs have a row for: the ones
+    /// installed and enabled, since a row for any other could do nothing.
+    pub(super) fn grid_agents(&self) -> Vec<usize> {
+        self.cfg.as_ref().map_or(Vec::new(), |c| {
+            (0..c.agents.len())
+                .filter(|&a| c.agents[a].active())
+                .collect()
+        })
     }
 
     /// What the houses tab's row `r` is.
     pub(super) fn house_row_at(&self, r: usize) -> Option<HouseRow> {
-        let agents = self.cfg.as_ref()?.agents.len();
-        if r < agents {
-            return Some(HouseRow::Agent(r));
+        let agents = self.grid_agents();
+        if let Some(&a) = agents.get(r) {
+            return Some(HouseRow::Agent(a));
         }
-        let i = r - agents;
+        let i = r - agents.len();
         (i < self.projects.as_ref()?.list.len()).then_some(HouseRow::Project(i))
     }
 

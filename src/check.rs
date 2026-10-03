@@ -1,6 +1,7 @@
 //! Whether the source itself is sound: the rules file parses, matches its
 //! schema and keeps its keys in the order its own `format.keys` lists, and
-//! every skill has a `SKILL.md` an agent can read.
+//! every skill has a `SKILL.md` an agent can read, and every MCP server is one
+//! every agent can be given.
 
 use crate::config::{self, Source, tilde};
 use serde_yaml::Value;
@@ -12,9 +13,11 @@ pub struct Report {
     pub rules: Option<usize>,
     pub skills: usize,
     pub house: usize,
+    /// How many MCP servers mcp.toml holds, when it parsed.
+    pub mcp: usize,
 }
 
-/// `48 rules · 6 skills · 3 house files`, each noun agreeing with its count.
+/// `48 rules · 6 skills · 3 conventions`, each noun agreeing with its count.
 pub fn counts(r: &Report) -> String {
     let n = |count: usize, one: &str| format!("{count} {one}{}", if count == 1 { "" } else { "s" });
     // A rules file that is not YAML, or none at all, has no count to give.
@@ -23,7 +26,10 @@ pub fn counts(r: &Report) -> String {
         parts.push(n(rules, "rule"));
     }
     parts.push(n(r.skills, "skill"));
-    parts.push(n(r.house, "house file"));
+    parts.push(n(r.house, "convention"));
+    if r.mcp > 0 {
+        parts.push(n(r.mcp, "MCP server"));
+    }
     parts.join(" · ")
 }
 
@@ -44,11 +50,20 @@ pub fn run(source: &Source) -> Report {
             ),
         });
     }
+    // Where tokens are kept matters to the agents, not to whether it is valid.
+    let mcp = match crate::mcp::load(&source.mcp, std::path::Path::new("")) {
+        Ok(servers) => servers.len(),
+        Err(e) => {
+            problems.push(format!("{e:#}"));
+            0
+        }
+    };
     Report {
         problems,
         rules,
         skills: skills.len(),
         house: config::house_files(source).len(),
+        mcp,
     }
 }
 

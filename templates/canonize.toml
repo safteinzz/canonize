@@ -1,5 +1,5 @@
 # canonize.toml: where the pieces of your canon are, and which agents it
-# reaches. `canon` reads it on every start; in the dashboard, e opens it here.
+# reaches. `canon` reads it on every start; in the dashboard, E opens it here.
 #
 # A value in quotes is text: "rules.yaml". A list goes in square brackets,
 # each item in quotes and separated by commas: ["~/dev", "~/work"]. A line
@@ -16,10 +16,13 @@ projects = {projects}
 rules  = "{rules}"
 # The schema `canon validate` holds the rules to. "" for none.
 schema = "{schema}"
-# Your house files: one * allowed in the file name. "" for none.
-house  = "{house}"
+# Your conventions, files an agent reads for one kind of work: one * allowed
+# in the file name. "" for none.
+conventions = "{house}"
 # The folder holding one folder per skill, each with a SKILL.md.
 skills = "{skills}"
+# Your MCP servers, one table each (see `canon --help`). "" for none.
+mcp    = "mcp.toml"
 
 # Every agent canonize knows (claude, codex, pi, opencode) comes with its own
 # paths. To change one, remove the # in front of its lines and edit them:

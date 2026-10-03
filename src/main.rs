@@ -29,6 +29,7 @@ mod cli;
 mod config;
 mod houses;
 mod init;
+mod mcp;
 mod plan;
 mod projects;
 mod selfcmd;
@@ -50,27 +51,23 @@ const WAYS: &str = "\x1b[1mWays to run it (not subcommands):\x1b[0m
 const AFTER: &str = concat!(
     "\
 \x1b[1mWhat a cell says:\x1b[0m
-  linked, imported  wired to your canon; a house file's import reads `imported`
-  none              a house file not wired there (`-` in the tables): not drift
-  unwired           `fix` wires it        broken  wired to the wrong thing, `fix` repoints it
-  own               only that agent has it, `adopt` takes it into your canon
-  foreign           yours or the agent's, left alone     n/a, off, -  cannot, off, not installed
+  linked   wired to your canon; a convention says imported, an MCP server added
+  unwired  `fix` wires it         broken    wired wrongly, `fix` repoints it
+  own      only that agent has it, `adopt` takes it into your canon
+  foreign  yours or the agent's, left alone        n/a, off  cannot, turned off
+  -        not installed (agents table); elsewhere not there (`none`), no drift
 
-\x1b[1mCANON.md:\x1b[0m
-  Each project keeps its house imports in its own CANON.md, written only by
-  canonize and kept out of git. Claude loads it from `@CANON.md` in the
-  project's CLAUDE.local.md, also kept out of git, which imports AGENTS.md too
-  when there is no CLAUDE.md; pi loads it from an extension and opencode from a
-  setting, all wired by `fix`. Codex cannot load another file, so it gets no
-  house files. Claude reads them only once you open it in the project and allow
-  external imports: `status` names each project still waiting, and `--json`
-  says `approved`, `not_asked` or `declined` under the project's `claude`.
+\x1b[1mConventions:\x1b[0m
+  Files an agent reads for one kind of work: an agent's row reads one everywhere,
+  a project imports it in its gitignored CANON.md, which Claude reads through
+  CLAUDE.local.md once allowed there (`--json` `claude`: approved, not_asked,
+  declined). Codex reads no other file. Adding one is the TUI's Conventions tab.
 
-\x1b[1mHouses:\x1b[0m
-  A house file an agent reads in every project: an `@` line in Claude's CLAUDE.md,
-  one in pi's own ~/.pi/agent/CANON.md, or a path in opencode's `instructions`.
-  `fix` repoints and `delete` takes back; adding one is in the TUI's Houses tab,
-  whose rows are every agent (for every project), then each project.
+\x1b[1mMCP servers:\x1b[0m
+  A table each in your canon's mcp.toml: a `url` (`token = true` for one typed in
+  the TUI and kept outside your canon; `--json` `token`: kept, missing) or a
+  `command`. The TUI's MCPs tab adds one to an agent or project (n new, e edit,
+  D delete); `fix` rewrites what differs, `delete` takes them back.
 
 Your canon is `$CANONIZE_SOURCE`, else your config folder (~/.config/canonize,
 and ~/Library/Application Support/canonize on macOS), and holds canonize.toml.
@@ -129,12 +126,12 @@ enum Cmd {
     ///   -n        dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Fix(cli::ChangeArgs),
-    /// Delete every link and import canonize made, and nothing else
+    /// Delete every link, import and MCP entry canonize made, and nothing else
     ///   -a NAME   only this agent
     ///   -n        dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Delete(cli::ChangeArgs),
-    /// Validate your canon: the rules file against its schema, and every skill's SKILL.md
+    /// Validate your canon: the rules file against its schema, every SKILL.md, mcp.toml
     ///   --json    print it for a script instead of a person
     #[command(verbatim_doc_comment)]
     Validate(cli::JsonArgs),
@@ -157,7 +154,7 @@ enum Cmd {
     Evict(cli::EvictArgs),
     /// Move your canon, or something in it, and repoint every import and link  <WHAT> <TO>
     ///   canon move canon ~/dotfiles/canon        the whole folder, agents repointed
-    ///   canon move HOUSE-WSL.md house            a file inside it, into house/
+    ///   canon move house conventions             renamed, or into a folder that is there
     #[command(verbatim_doc_comment)]
     Move(cli::MoveArgs),
     /// Change a setting in canonize.toml, comments and all
@@ -165,7 +162,7 @@ enum Cmd {
     ///     -n        dry run: print the line it would write and change nothing
     #[command(verbatim_doc_comment, subcommand)]
     Config(cli::ConfigCmd),
-    /// Lay out a new canon folder: canonize.toml, rules.yaml, its schema, house/, skills/  [DIR]
+    /// Lay out a new canon folder: canonize.toml, rules.yaml, its schema, conventions/, skills/  [DIR]
     ///   -n        dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Init(cli::InitArgs),

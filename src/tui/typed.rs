@@ -2,10 +2,11 @@
 //! exists nowhere else. Enter does nothing until the field holds the thing's
 //! exact name, which the body shows so it is copied rather than guessed.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 
+use super::line_edit;
 use super::widgets::*;
 use crate::plan::Change;
 
@@ -15,6 +16,8 @@ pub(crate) struct Typed {
     /// What has to be typed.
     pub(crate) name: String,
     pub(crate) input: String,
+    /// The cursor in `input`, as characters after it (`line_edit::edit`).
+    pub(crate) back: usize,
     pub(crate) changes: Vec<Change>,
 }
 
@@ -29,13 +32,9 @@ impl Typed {
         match key.code {
             KeyCode::Esc => return Typing::Cancelled,
             KeyCode::Enter if self.input == self.name => return Typing::Confirmed,
-            KeyCode::Backspace => {
-                self.input.pop();
+            _ => {
+                line_edit::edit(&mut self.input, &mut self.back, key);
             }
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.input.push(c)
-            }
-            _ => {}
         }
         Typing::Pending
     }
@@ -44,7 +43,13 @@ impl Typed {
 pub(super) fn render_typed(f: &mut Frame, area: Rect, t: &Typed) {
     let width = box_width(area.width);
     let inner = box_inner_width(width);
-    let runs: Vec<String> = t.changes.iter().map(Change::command).collect();
+    // A change can run several commands, one per line, and each is its own row.
+    let runs: Vec<String> = t
+        .changes
+        .iter()
+        .map(Change::command)
+        .flat_map(|c| c.lines().map(String::from).collect::<Vec<_>>())
+        .collect();
     let field = format!("type {}:  {}█", t.name, t.input);
     // Every line is counted wrapped: an unwrapped count is what clips the
     // field and the key line off a gate and leaves it looking unanswerable.
@@ -75,18 +80,20 @@ pub(super) fn render_typed(f: &mut Frame, area: Rect, t: &Typed) {
     }
     lines.push(Line::raw(""));
     let ok = t.input == t.name;
-    lines.push(Line::from(vec![
-        Span::raw(format!("type {}:  ", t.name)),
-        Span::styled(
-            t.input.clone(),
-            Style::default().add_modifier(Modifier::BOLD).fg(if ok {
-                Color::Red
-            } else {
-                Color::Reset
-            }),
-        ),
-        Span::raw("█"),
-    ]));
+    lines.push(Line::from(
+        vec![Span::raw(format!("type {}:  ", t.name))]
+            .into_iter()
+            .chain(line_edit::with_cursor(
+                &t.input,
+                t.back,
+                Style::default().add_modifier(Modifier::BOLD).fg(if ok {
+                    Color::Red
+                } else {
+                    Color::Reset
+                }),
+            ))
+            .collect::<Vec<_>>(),
+    ));
     lines.push(Line::raw(""));
     lines.push(box_hint(if ok {
         "enter delete · esc cancel"

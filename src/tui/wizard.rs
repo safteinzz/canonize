@@ -1,10 +1,11 @@
 //! The setup wizard: six questions, each pre-filled with what canonize found
 //! and a note saying why, so nothing is chosen for the user unseen.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::prelude::*;
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 
+use super::line_edit;
 use super::widgets::*;
 use crate::config::{self, tilde};
 use crate::setup::{self, Choice, Found, Lost, Pick};
@@ -46,6 +47,9 @@ pub(crate) struct Wizard {
     picked: [usize; 6],
     skills: String,
     projects: String,
+    /// The cursor of each typed answer, as characters after it, in the order
+    /// folder, skills, projects (`line_edit::edit`).
+    backs: [usize; 3],
 }
 
 pub(crate) enum Outcome {
@@ -77,6 +81,7 @@ impl Wizard {
             picked: [0; 6],
             skills: "skills".to_string(),
             projects: crate::projects::guess().join(", "),
+            backs: [0; 3],
         };
         w.fill();
         w
@@ -158,15 +163,15 @@ impl Wizard {
         if !self
             .house
             .iter()
-            .any(|o| o.value.as_deref() == Some("house/*.md"))
+            .any(|o| o.value.as_deref() == Some("conventions/*.md"))
         {
             self.house.push(Option_ {
-                label: "house/*.md   (a folder for them, empty for now)".into(),
-                value: Some("house/*.md".into()),
+                label: "conventions/*.md   (a folder for them, empty for now)".into(),
+                value: Some("conventions/*.md".into()),
             });
         }
         self.house.push(Option_ {
-            label: "no house files".into(),
+            label: "no conventions".into(),
             value: None,
         });
         self.picked[3] = 0;
@@ -245,27 +250,25 @@ impl Wizard {
                     None => return Outcome::Done(self.choice()),
                 }
             }
-            Backspace if typing => {
-                let field = self.field();
-                field.pop();
+            _ if typing => {
+                let (text, back) = self.field();
+                line_edit::edit(text, back, key);
             }
-            Char(c) if typing && !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.field().push(c)
-            }
-            Down | Char('j') if !typing => {
+            Down | Char('j') => {
                 self.picked[i] = (self.picked[i] + 1).min(self.len().saturating_sub(1))
             }
-            Up | Char('k') if !typing => self.picked[i] = self.picked[i].saturating_sub(1),
+            Up | Char('k') => self.picked[i] = self.picked[i].saturating_sub(1),
             _ => {}
         }
         Outcome::Pending
     }
 
-    fn field(&mut self) -> &mut String {
+    fn field(&mut self) -> (&mut String, &mut usize) {
+        let [folder, skills, projects] = &mut self.backs;
         match self.step {
-            Step::Skills => &mut self.skills,
-            Step::Projects => &mut self.projects,
-            _ => &mut self.folder,
+            Step::Skills => (&mut self.skills, skills),
+            Step::Projects => (&mut self.projects, projects),
+            _ => (&mut self.folder, folder),
         }
     }
 }
@@ -278,15 +281,15 @@ pub(super) fn render_wizard(f: &mut Frame, area: Rect, w: &Wizard) {
 
     let (question, label) = match w.step {
         Step::Folder => (
-            "Welcome. Where should your canon live? It is the one folder that holds your rules, house files and skills, and every agent reads from it.",
+            "Welcome. Where should your canon live? It is the one folder that holds your rules, conventions and skills, and every agent reads from it.",
             "folder",
         ),
         Step::Rules => ("Which file in your canon is your rules?", ""),
         Step::Schema => ("Which schema should `canon validate` hold them to?", ""),
-        Step::House => ("Which are your house files?", ""),
+        Step::House => ("Which are your conventions?", ""),
         Step::Skills => ("Where in your canon should your skills live?", "skills"),
         Step::Projects => (
-            "Where are your projects? canonize shows which house files each one imports.",
+            "Where are your projects? canonize shows which conventions each one imports.",
             "projects",
         ),
     };
@@ -295,19 +298,26 @@ pub(super) fn render_wizard(f: &mut Frame, area: Rect, w: &Wizard) {
 
     match w.step {
         Step::Folder | Step::Skills | Step::Projects => {
-            let value = match w.step {
-                Step::Folder => &w.folder,
-                Step::Skills => &w.skills,
-                _ => &w.projects,
+            let (value, back) = match w.step {
+                Step::Folder => (&w.folder, w.backs[0]),
+                Step::Skills => (&w.skills, w.backs[1]),
+                _ => (&w.projects, w.backs[2]),
             };
-            // Both typed fields refuse a blank, so both carry the red star.
-            lines.push(Line::from(vec![
-                Span::raw(label.to_string()),
-                Span::styled("*", Style::default().fg(Color::Red)),
-                Span::raw(format!("{:<1$}", ":", 14 - label.chars().count())),
-                Span::styled(value.clone(), Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("█"),
-            ]));
+            // Folder and skills refuse a blank, so they carry the red star;
+            // a blank projects answer is fine, so it does not.
+            let required = w.step != Step::Projects;
+            let mut spans = vec![Span::raw(label.to_string())];
+            if required {
+                spans.push(Span::styled("*", Style::default().fg(Color::Red)));
+            }
+            let used = label.chars().count() + usize::from(required);
+            spans.push(Span::raw(format!("{:<1$}", ":", 14 - used)));
+            spans.extend(line_edit::with_cursor(
+                value,
+                back,
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
+            lines.push(Line::from(spans));
             if w.step == Step::Folder {
                 match (&w.found, &w.lost) {
                     (Some(fd), Some(l)) if fd.root == w.root() => note.push(format!(
@@ -381,9 +391,9 @@ pub(super) fn render_wizard(f: &mut Frame, area: Rect, w: &Wizard) {
     }
     lines.push(Line::raw(""));
     let hint = match w.step {
-        Step::Folder => "type to change · enter next · esc cancel · * required",
-        Step::Skills => "type to change · enter next · esc back · * required",
-        Step::Projects => "type to change · enter review · esc back",
+        Step::Folder => "enter next · esc cancel · * required",
+        Step::Skills => "enter next · esc back · * required",
+        Step::Projects => "enter review · esc back",
         _ => "j/k ↑↓ choose · enter next · esc back",
     };
     lines.push(box_hint(hint));

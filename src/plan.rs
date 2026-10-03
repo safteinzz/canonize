@@ -205,6 +205,25 @@ pub enum Change {
         file: PathBuf,
         line: String,
     },
+    /// Write an MCP server into one agent's config, over what is there.
+    McpSet {
+        at: crate::mcp::Where,
+        name: String,
+        spec: crate::mcp::Spec,
+    },
+    /// Take an MCP server out of the canon's mcp.toml, with its kept token.
+    McpUndefine {
+        file: PathBuf,
+        name: String,
+        token: Option<PathBuf>,
+    },
+    /// Take an MCP server out of one agent's config; `in_project` when the
+    /// file is a project's, whose folder (`.codex/`, `.pi/`) goes if emptied.
+    McpRemove {
+        at: crate::mcp::Where,
+        name: String,
+        in_project: bool,
+    },
 }
 
 impl Change {
@@ -229,6 +248,10 @@ impl Change {
             Change::JsonInstruction { file, value } => (file, value),
             Change::AddImport { file, line } | Change::RemoveImport { file, line } => (file, line),
             Change::ReplaceImport { file, new, .. } => (file, new),
+            Change::McpSet { at, name, .. } | Change::McpRemove { at, name, .. } => {
+                (at.path(), name)
+            }
+            Change::McpUndefine { file, name, .. } => (file, name),
         }
     }
 
@@ -253,6 +276,9 @@ impl Change {
             Change::Adopt { .. } => "adopt",
             Change::Evict { .. } => "evict",
             Change::Rename { .. } => "move",
+            Change::McpSet { .. } => "add server",
+            Change::McpRemove { .. } => "delete server",
+            Change::McpUndefine { .. } => "delete from canon",
         }
     }
 
@@ -300,6 +326,19 @@ impl Change {
                 format!("move {} out of your canon into {}", tilde(from), tilde(to))
             }
             Change::Rename { from, to } => format!("move {} to {}", tilde(from), tilde(to)),
+            Change::McpSet { at, name, .. } => {
+                format!("add MCP server `{name}` to {}", at.describe())
+            }
+            Change::McpRemove { at, name, .. } => {
+                format!("delete MCP server `{name}` from {}", at.describe())
+            }
+            Change::McpUndefine { file, name, token } => match token {
+                Some(_) => format!(
+                    "delete MCP server `{name}` from {}, and its kept token",
+                    tilde(file)
+                ),
+                None => format!("delete MCP server `{name}` from {}", tilde(file)),
+            },
         }
     }
 
@@ -363,11 +402,29 @@ impl Change {
             Change::RemoveImport { file, line } => {
                 format!("sed -i '\\#^{line}$#d' {}", tilde(file))
             }
+            Change::McpSet { at, name, spec } => crate::mcp::command(at, name, Some(spec)),
+            Change::McpRemove { at, name, .. } => crate::mcp::command(at, name, None),
+            Change::McpUndefine { file, name, token } => {
+                let mut out = format!("# delete [{name}] from {}", tilde(file));
+                if let Some(t) = token {
+                    out.push_str(&format!("\nrm -f {}", tilde(t)));
+                }
+                out
+            }
         }
     }
 
     pub fn run(&self) -> Result<()> {
         match self {
+            Change::McpSet { at, name, spec } => crate::mcp::set(at, name, spec),
+            Change::McpRemove {
+                at,
+                name,
+                in_project,
+            } => crate::mcp::remove(at, name, *in_project),
+            Change::McpUndefine { file, name, token } => {
+                crate::mcp::undefine(file, name, token.as_deref())
+            }
             Change::Link { at, to } => {
                 if let Some(parent) = at.parent() {
                     fs::create_dir_all(parent)
@@ -382,6 +439,10 @@ impl Change {
             Change::Unlink { at } => remove_link(at),
             Change::AppendLine { file, line } => {
                 let mut text = read_text(file)?.unwrap_or_default();
+                // Two changes in one run can ask for the same line.
+                if text.lines().any(|l| l.trim() == line) {
+                    return Ok(());
+                }
                 if !text.is_empty() && !text.ends_with('\n') {
                     text.push('\n');
                 }

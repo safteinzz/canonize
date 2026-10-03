@@ -5,6 +5,7 @@ use crate::check;
 use crate::config::{self, Config, RulesMode, SkillsMode, tilde};
 use crate::houses::Houses;
 use crate::init;
+use crate::mcp::Mcps;
 use crate::plan::{self, Change, Plan, Row, State};
 use crate::projects::{self, Projects};
 use crate::setup;
@@ -57,8 +58,8 @@ pub struct SetupArgs {
     /// The schema `canon validate` holds them to ("" for none)
     #[arg(long, value_name = "NAME")]
     pub schema: Option<String>,
-    /// Your house files, one `*` allowed in the name ("" for none)
-    #[arg(long, value_name = "PATTERN")]
+    /// Your conventions, one `*` allowed in the name ("" for none)
+    #[arg(long = "conventions", alias = "house", value_name = "PATTERN")]
     pub house: Option<String>,
     /// The folder your skills live in
     #[arg(long, value_name = "DIR")]
@@ -105,7 +106,7 @@ pub struct EvictArgs {
 pub struct MoveArgs {
     /// `canon` for the whole folder, or the name of something inside it
     pub what: String,
-    /// Where it goes: the new folder, or a folder inside your canon
+    /// Where it goes: a folder to move it into, or its new name
     pub to: String,
     /// Dry run: print what would change and change nothing
     #[arg(short = 'n', long)]
@@ -174,23 +175,30 @@ pub fn status(args: AgentArgs) -> Result<i32> {
     let plan = Plan::build(&cfg);
     let projects = Projects::build(&cfg);
     let houses = Houses::build(&cfg);
+    let mcps = Mcps::build(&cfg, &projects);
     let unsettled = plan.unsettled(only);
     // With `-a`, only that agent's drift counts: the projects' rows are not
     // printed either, so a gate on one agent is about that agent alone.
-    let unfixed =
-        plan.drifted(only) || houses.drifted(only) || (only.is_none() && projects.drifted());
+    let unfixed = plan.drifted(only)
+        || houses.drifted(only)
+        || mcps.drifted(only)
+        || (only.is_none() && projects.drifted());
     let unapproved = if only.is_none() {
         projects.unapproved()
     } else {
         Vec::new()
     };
-    let code =
-        i32::from(unfixed || (args.strict && (!unsettled.is_empty() || !unapproved.is_empty())));
+    let elsewhere = foreign_elsewhere(&cfg, &houses, &projects, &mcps, only);
+    let code = i32::from(
+        unfixed
+            || (args.strict
+                && (!unsettled.is_empty() || !unapproved.is_empty() || !elsewhere.is_empty())),
+    );
     if args.json {
         out!(
             "{}",
             serde_json::to_string_pretty(&status_json(
-                &cfg, &plan, &houses, &projects, only, code
+                &cfg, &plan, &houses, &projects, &mcps, only, code
             ))?
         );
         return Ok(code);
@@ -281,6 +289,7 @@ pub fn status(args: AgentArgs) -> Result<i32> {
     }
     let shown = (only.is_none() && !cfg.projects.is_empty()).then_some(&projects);
     print_houses(&cfg, &houses, shown, &cols, &mut notes);
+    print_mcp(&cfg, &mcps, shown, &cols, &mut notes);
     if !notes.is_empty() {
         out!();
         for n in notes {
@@ -307,6 +316,7 @@ pub fn status(args: AgentArgs) -> Result<i32> {
             .iter()
             .filter_map(|(p, a)| Some((projects::short(&cfg, &p.root), a.advice(&cfg, p)?))),
     );
+    needs.extend(elsewhere.into_iter().map(|f| (f.who, f.why)));
     if !needs.is_empty() {
         out!();
         out!(
@@ -327,6 +337,87 @@ pub fn status(args: AgentArgs) -> Result<i32> {
         }
     }
     Ok(code)
+}
+
+/// A cell outside the agents' table that `fix` leaves alone: a convention or
+/// an MCP server an agent keeps in a file canonize will not touch.
+struct Foreign {
+    agent: Option<String>,
+    kind: &'static str,
+    name: String,
+    /// How `status` names it.
+    who: String,
+    why: String,
+}
+
+/// Every foreign cell of the conventions and MCP tables, and every project
+/// whose Claude wiring canonize refuses; a project's only without `-a`.
+fn foreign_elsewhere(
+    cfg: &Config,
+    houses: &Houses,
+    projects: &Projects,
+    mcps: &Mcps,
+    only: Option<usize>,
+) -> Vec<Foreign> {
+    let mut out = Vec::new();
+    let agents = |a: &usize| only.is_none_or(|o| o == *a);
+    for (h, row) in houses.house.iter().zip(&houses.cells) {
+        for (a, c) in row.iter().enumerate().filter(|(a, _)| agents(a)) {
+            if let State::Foreign(why) = &c.state {
+                out.push(Foreign {
+                    agent: Some(cfg.agents[a].name.clone()),
+                    kind: "convention",
+                    name: house_label(h),
+                    who: format!("{} {}", cfg.agents[a].name, house_label(h)),
+                    why: why.clone(),
+                });
+            }
+        }
+    }
+    for (s, row) in mcps.servers.iter().zip(&mcps.cells) {
+        for (a, c) in row.iter().enumerate().filter(|(a, _)| agents(a)) {
+            if let State::Foreign(why) = &c.state {
+                out.push(Foreign {
+                    agent: Some(cfg.agents[a].name.clone()),
+                    kind: "mcp",
+                    name: s.name.clone(),
+                    who: format!("{} {}", cfg.agents[a].name, s.name),
+                    why: why.clone(),
+                });
+            }
+        }
+    }
+    if only.is_some() {
+        return out;
+    }
+    for (p, cells) in projects.list.iter().zip(&mcps.projects) {
+        let short = projects::short(cfg, &p.root);
+        for (s, c) in mcps.servers.iter().zip(cells) {
+            if let State::Foreign(why) = &c.state {
+                out.push(Foreign {
+                    agent: None,
+                    kind: "mcp",
+                    name: s.name.clone(),
+                    who: format!("{short} {}", s.name),
+                    why: why.clone(),
+                });
+            }
+        }
+        if p.uses_canon() {
+            for w in &p.wiring {
+                if let State::Foreign(why) = &w.state {
+                    out.push(Foreign {
+                        agent: Some("claude".into()),
+                        kind: "project",
+                        name: short.clone(),
+                        who: short.clone(),
+                        why: why.clone(),
+                    });
+                }
+            }
+        }
+    }
+    out
 }
 
 /// What a person can do about a cell `fix` leaves alone.
@@ -394,6 +485,7 @@ fn status_json(
     plan: &Plan,
     houses: &Houses,
     projects: &Projects,
+    mcps: &Mcps,
     only: Option<usize>,
     code: i32,
 ) -> serde_json::Value {
@@ -486,7 +578,7 @@ fn status_json(
             json!({
                 "path": p.root,
                 "name": projects::short(cfg, &p.root),
-                "house": house,
+                "conventions": house,
                 "wiring": wiring,
                 "dead": p.dead,
                 "claude": p.claude.map(projects::Approval::id),
@@ -507,6 +599,20 @@ fn status_json(
             })
         })
         .collect();
+    unsettled.extend(
+        foreign_elsewhere(cfg, houses, projects, mcps, only)
+            .into_iter()
+            .map(|f| {
+                json!({
+                    "agent": f.agent,
+                    "kind": f.kind,
+                    "name": f.name,
+                    "state": "foreign",
+                    "why": f.why,
+                    "advice": f.why,
+                })
+            }),
+    );
     if only.is_none() {
         unsettled.extend(projects.unapproved().into_iter().map(|(p, a)| {
             json!({
@@ -526,7 +632,7 @@ fn status_json(
         "rows": rows,
         "leftovers": leftovers,
         "stale": plan.stale_for(only).into_iter().map(Change::describe).collect::<Vec<_>>(),
-        "houses": houses_json,
+        "conventions": houses_json,
         "projects": projects_json,
         "unsettled": unsettled,
         "strays": config::strays(&cfg.source)
@@ -536,8 +642,10 @@ fn status_json(
         "writes_into_canon": writes_into_canon(cfg, only).map(|(agents, advice)| json!({
             "agents": agents, "advice": advice
         })),
+        "mcp": mcp_json(cfg, mcps, projects, &cols),
         "drifted": plan.drifted(only)
             || houses.drifted(only)
+            || mcps.drifted(only)
             || (only.is_none() && projects.drifted()),
         "exit": code,
     })
@@ -549,7 +657,12 @@ pub fn house_label(path: &std::path::Path) -> String {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
-    stem.strip_prefix("HOUSE-").unwrap_or(&stem).to_lowercase()
+    let upper = stem.to_uppercase();
+    let cut = ["CONVENTIONS-", "HOUSE-"]
+        .iter()
+        .find(|p| upper.starts_with(*p))
+        .map_or(0, |p| p.len());
+    stem[cut..].to_lowercase()
 }
 
 /// A house cell's state name for `--json`: `imported` where the rows say
@@ -564,6 +677,180 @@ fn house_state(state: &State) -> &'static str {
 
 /// The houses table's title over the agents' rows.
 const EVERY_PROJECT: &str = "every project";
+
+/// An MCP cell's word: `added` for a server an agent has, `-` for one it has
+/// not, since neither needs fixing.
+pub fn mcp_word(state: &State) -> &'static str {
+    match state {
+        State::Linked => "added",
+        State::Missing => "-",
+        s => s.word(),
+    }
+}
+
+/// An MCP cell's state name for `--json`: `added` and `none` where the
+/// tables say `added` and `-`.
+fn mcp_state(state: &State) -> &'static str {
+    match state {
+        State::Linked => "added",
+        State::Missing => "none",
+        s => s.id(),
+    }
+}
+
+/// The MCP servers for a script: each with every agent's cell and every
+/// project's, under the same names the tables use.
+fn mcp_json(cfg: &Config, m: &Mcps, p: &Projects, cols: &[usize]) -> serde_json::Value {
+    use serde_json::{Value, json};
+    let servers: Vec<Value> = m
+        .servers
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let cells: serde_json::Map<String, Value> = cols
+                .iter()
+                .map(|&a| {
+                    let c = &m.cells[i][a];
+                    (
+                        cfg.agents[a].name.clone(),
+                        json!({ "state": mcp_state(&c.state), "why": c.state.why(), "at": c.at }),
+                    )
+                })
+                .collect();
+            json!({
+                "name": s.name,
+                "server": s.summary(),
+                "vars": s.vars(),
+                "token": s.kept().map(|k| if k.is_file() { "kept" } else { "missing" }),
+                "cells": cells,
+            })
+        })
+        .collect();
+    let projects: Vec<Value> = p
+        .list
+        .iter()
+        .zip(&m.projects)
+        .map(|(x, cells)| {
+            let servers: serde_json::Map<String, Value> = m
+                .servers
+                .iter()
+                .zip(cells)
+                .map(|(s, c)| {
+                    (
+                        s.name.clone(),
+                        json!({ "state": mcp_state(&c.state), "why": c.state.why() }),
+                    )
+                })
+                .collect();
+            json!({ "path": x.root, "name": projects::short(cfg, &x.root), "servers": servers })
+        })
+        .collect();
+    json!({
+        "file": cfg.source.mcp,
+        "error": m.error,
+        "servers": servers,
+        "projects": projects,
+        "unset": m.unset().into_iter().map(|(s, v)| json!({ "server": s, "var": v })).collect::<Vec<_>>(),
+    })
+}
+
+/// Which agent and project has which MCP server, as one table under the
+/// houses': each agent's row is its global config. Printed only when the
+/// canon has servers, or a broken mcp.toml.
+fn print_mcp(
+    cfg: &Config,
+    m: &Mcps,
+    p: Option<&Projects>,
+    cols: &[usize],
+    notes: &mut Vec<String>,
+) {
+    if let Some(e) = &m.error {
+        notes.push(e.clone());
+    }
+    if m.servers.is_empty() {
+        return;
+    }
+    out!();
+    let names: Vec<&str> = m.servers.iter().map(|s| s.name.as_str()).collect();
+    let col_w = names
+        .iter()
+        .map(|n| n.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+    let label_w = cols
+        .iter()
+        .map(|&i| cfg.agents[i].name.chars().count())
+        .chain(
+            p.into_iter()
+                .flat_map(|p| &p.list)
+                .map(|x| projects::short(cfg, &x.root).chars().count()),
+        )
+        .max()
+        .unwrap_or(0)
+        .max(EVERY_PROJECT.len());
+    let head = |title: &str| {
+        let mut line = format!(
+            "{}{}",
+            title.dimmed(),
+            " ".repeat(label_w.saturating_sub(title.chars().count()))
+        );
+        for n in &names {
+            line.push_str(&format!(
+                "  {}{}",
+                n.bold(),
+                " ".repeat(col_w.saturating_sub(n.chars().count()))
+            ));
+        }
+        out!("{}", line.trim_end());
+    };
+    let cell = |s: &State| {
+        let word = mcp_word(s);
+        let painted = match s {
+            State::Linked => word.green().to_string(),
+            State::Missing => word.dimmed().to_string(),
+            _ => paint(s),
+        };
+        format!(
+            "  {painted}{}",
+            " ".repeat(col_w.saturating_sub(word.len()))
+        )
+    };
+    head(EVERY_PROJECT);
+    // An agent that is not installed or is disabled can do nothing here.
+    for &a in cols.iter().filter(|&&a| cfg.agents[a].active()) {
+        let name = &cfg.agents[a].name;
+        let mut line = format!("{name:label_w$}");
+        for (i, server) in names.iter().enumerate() {
+            let s = &m.cells[i][a].state;
+            line.push_str(&cell(s));
+            if let State::Broken(why) = s {
+                notes.push(format!("{name} {server}: {why}"));
+            }
+        }
+        out!("{}", line.trim_end());
+    }
+    if let Some(p) = p {
+        head("projects");
+        for (x, cells) in p.list.iter().zip(&m.projects) {
+            let short = projects::short(cfg, &x.root);
+            let mut line = format!("{short:label_w$}");
+            for (c, server) in cells.iter().zip(&names) {
+                line.push_str(&cell(&c.state));
+                if let State::Broken(why) = &c.state {
+                    notes.push(format!("{short} {server}: {why}"));
+                }
+            }
+            out!("{}", line.trim_end());
+        }
+    }
+    notes.extend(m.token_notes(cfg));
+    for (server, var) in m.unset() {
+        notes.push(format!(
+            "{server}: `{var}` is not set here, so an agent started from this shell has no value for it"
+        ));
+    }
+}
 
 /// Who reads which house file, as one table under the agents': each agent's
 /// row is for every project. Printed only when the canon has house files.
@@ -607,7 +894,7 @@ fn print_houses(
         out!("{}", line.trim_end());
     };
     head(EVERY_PROJECT);
-    for &i in cols {
+    for &i in cols.iter().filter(|&&i| cfg.agents[i].active()) {
         let name = &cfg.agents[i].name;
         let mut line = format!("{name:label_w$}");
         for (house, row) in houses.iter().zip(&h.cells) {
@@ -618,7 +905,7 @@ fn print_houses(
                 _ => (s.word(), paint(s)),
             };
             line.push_str(&format!("  {painted}{}", " ".repeat(10 - word.len())));
-            if let Some(why) = s.why() {
+            if let State::Broken(why) = s {
                 notes.push(format!("{name} {house}: {why}"));
             }
         }
@@ -650,12 +937,6 @@ fn print_projects(cfg: &Config, p: &Projects, label_w: usize, notes: &mut Vec<St
             }
         }
         if x.uses_canon() {
-            for why in x.wiring.iter().filter_map(|w| match &w.state {
-                State::Foreign(why) => Some(why),
-                _ => None,
-            }) {
-                notes.push(format!("{}: {why}", projects::short(cfg, &x.root)));
-            }
             for c in x.wiring_changes() {
                 notes.push(format!(
                     "{}: {}",
@@ -709,7 +990,13 @@ pub fn fix(args: ChangeArgs) -> Result<i32> {
             all
         }
     };
-    let changes = plan::dedup(changes.into_iter().chain(Houses::build(&cfg).fixes(only)));
+    let mcps = Mcps::build(&cfg, &Projects::build(&cfg)).fixes(only);
+    let changes = plan::dedup(
+        changes
+            .into_iter()
+            .chain(Houses::build(&cfg).fixes(only))
+            .chain(mcps),
+    );
     Ok(run_changes(
         changes,
         args.dry_run,
@@ -723,6 +1010,7 @@ pub fn delete(args: ChangeArgs) -> Result<i32> {
     let plan = Plan::build(&cfg);
     let mut changes = plan.undos(only);
     changes.extend(Houses::build(&cfg).undos(only));
+    changes.extend(Mcps::build(&cfg, &Projects::build(&cfg)).undos(only));
     // Without `-a` it takes back everything, each project's CANON.md wiring
     // included, which is what `--help` promises.
     if only.is_none() {
@@ -746,7 +1034,8 @@ pub fn validate(args: JsonArgs) -> Result<i32> {
                 "problems": report.problems,
                 "rules": report.rules,
                 "skills": report.skills,
-                "house": report.house,
+                "conventions": report.house,
+                "mcp": report.mcp,
                 "exit": code,
             }))?
         );
@@ -867,29 +1156,32 @@ pub fn move_it(args: MoveArgs) -> Result<i32> {
 /// folder as the config knows it, a path for one the config no longer knows
 /// (a move that stopped halfway), or a name inside the canon.
 fn targets(cfg: &Config, what: &str, to: &str) -> Result<(PathBuf, PathBuf)> {
-    if what == "canon" {
-        return Ok((cfg.source.root.clone(), config::expand(to)));
-    }
-    if what.starts_with('~') || what.starts_with('/') {
-        let from = config::expand(what);
-        let to = if to.starts_with('~') || to.starts_with('/') {
-            config::expand(to)
-        } else {
-            cfg.source.root.join(to)
-        };
-        return Ok((from, to));
-    }
-    let from = cfg.source.root.join(what);
-    let name = std::path::Path::new(what)
-        .file_name()
-        .map(|n| n.to_os_string())
-        .with_context(|| format!("`{what}` has no name"))?;
-    let dir = if to.starts_with('~') || to.starts_with('/') {
+    let from = if what == "canon" {
+        cfg.source.root.clone()
+    } else if what.starts_with('~') || what.starts_with('/') {
+        config::expand(what)
+    } else {
+        cfg.source.root.join(what)
+    };
+    let dest = if to.starts_with('~') || to.starts_with('/') {
         config::expand(to)
     } else {
         cfg.source.root.join(to)
     };
-    Ok((from, dir.join(name)))
+    let name = from
+        .file_name()
+        .map(|n| n.to_os_string())
+        .with_context(|| format!("`{what}` has no name"))?;
+    // As `mv` reads it: into a folder that is there, else renamed to `to`. A
+    // move already done is told by where it landed, so running it again finds
+    // the same place.
+    let into = dest.join(&name);
+    let inside = if fs::symlink_metadata(&from).is_ok() {
+        dest.is_dir()
+    } else {
+        fs::symlink_metadata(&into).is_ok()
+    };
+    Ok((from, if inside { into } else { dest }))
 }
 
 /// The move itself, then everything that has to be repointed after it. The

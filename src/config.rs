@@ -43,6 +43,8 @@ pub struct Source {
     /// A pattern relative to `root` with at most one `*` in its file name.
     pub house: String,
     pub skills: PathBuf,
+    /// The canon's MCP servers, one table each; empty when turned off.
+    pub mcp: PathBuf,
 }
 
 pub struct Agent {
@@ -80,6 +82,9 @@ pub struct Config {
     /// Claude Code's own state file, where it records which projects may load
     /// files outside themselves. Read, never written.
     pub claude_state: PathBuf,
+    /// Where the MCP servers' tokens are kept, one file each, outside the
+    /// canon so no secret ever reaches the dotfiles.
+    pub tokens: PathBuf,
 }
 
 #[derive(Deserialize, Default)]
@@ -98,8 +103,11 @@ struct RawConfig {
 struct RawSource {
     rules: Option<String>,
     schema: Option<String>,
-    house: Option<String>,
+    /// Read from `house` too, its name before 0.3.0.
+    #[serde(alias = "house")]
+    conventions: Option<String>,
     skills: Option<String>,
+    mcp: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -212,8 +220,16 @@ fn build(root: &Path, raw: RawConfig, path: PathBuf) -> Result<Config> {
         root: root.to_path_buf(),
         rules: rel(raw.source.rules, "rules.yaml"),
         schema: rel(raw.source.schema, "rules.schema.json"),
-        house: raw.source.house.unwrap_or_else(|| "house/*.md".to_string()),
+        // `house/`, the folder before 0.3.0, until there is a `conventions/`.
+        house: raw.source.conventions.unwrap_or_else(|| {
+            if !root.join("conventions").exists() && root.join("house").is_dir() {
+                "house/*.md".to_string()
+            } else {
+                "conventions/*.md".to_string()
+            }
+        }),
         skills: rel(raw.source.skills, "skills"),
+        mcp: rel(raw.source.mcp, "mcp.toml"),
     };
 
     let mut agents = defaults();
@@ -268,6 +284,9 @@ fn build(root: &Path, raw: RawConfig, path: PathBuf) -> Result<Config> {
         path,
         shortcut: source_dir(),
         claude_state: claude_state(),
+        tokens: dirs::data_dir()
+            .unwrap_or_else(|| home().join(".local/share"))
+            .join("canonize/tokens"),
     })
 }
 
@@ -416,6 +435,11 @@ pub fn set_key(path: &Path, key: &str, literal: &str, dry_run: bool) -> Result<S
         );
     }
 
+    // `house`, its name before 0.3.0, is the same setting as `conventions`.
+    let names: Vec<&str> = match (section, leaf) {
+        (Some("source"), "conventions" | "house") => vec!["conventions", "house"],
+        _ => vec![leaf],
+    };
     let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
     let mut here: Option<String> = None;
     let mut found = None;
@@ -435,7 +459,7 @@ pub fn set_key(path: &Path, key: &str, literal: &str, dry_run: bool) -> Result<S
         if here.as_deref() == section
             && trimmed
                 .split_once('=')
-                .is_some_and(|(name, _)| name.trim() == leaf)
+                .is_some_and(|(name, _)| names.contains(&name.trim()))
         {
             found = Some(i);
             break;
@@ -444,12 +468,11 @@ pub fn set_key(path: &Path, key: &str, literal: &str, dry_run: bool) -> Result<S
 
     // The line, keeping the padding the file already uses around `=`.
     let line = match found {
-        Some(i) => {
-            let head = lines[i]
-                .split_once('=')
-                .map_or(leaf.to_string(), |(h, _)| h.to_string());
-            format!("{head}= {literal}")
-        }
+        Some(i) => match lines[i].split_once('=') {
+            // The line keeps its padding, and takes the name asked for.
+            Some((h, _)) if h.trim() == leaf => format!("{h}= {literal}"),
+            _ => format!("{leaf} = {literal}"),
+        },
         None => format!("{leaf} = {literal}"),
     };
     match (found, section_at, section) {

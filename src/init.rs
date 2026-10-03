@@ -21,7 +21,7 @@ pub fn config_text(projects: &str, rules: &str, schema: &str, house: &str, skill
         .replace("{skills}", skills)
 }
 
-const DIRS: [&str; 2] = ["house", "skills"];
+const DIRS: [&str; 2] = ["conventions", "skills"];
 
 /// Create what is missing and report each path with whether it was created.
 /// An existing file is never overwritten, so running it twice is harmless. A
@@ -35,7 +35,7 @@ pub fn run(root: &Path, dry_run: bool) -> Result<Vec<(String, bool)>> {
         "[]",
         "rules.yaml",
         "rules.schema.json",
-        "house/*.md",
+        "conventions/*.md",
         "skills",
     );
     let files = std::iter::once((CONFIG_FILE, config.as_str())).chain(FILES);

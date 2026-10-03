@@ -50,6 +50,19 @@ impl Temp {
         path
     }
 
+    /// A real git repo at `rel`, since git only counts one it made itself.
+    pub fn git(&self, rel: &str) -> PathBuf {
+        let path = self.dir(rel);
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args(["init", "-q"])
+            .status()
+            .is_ok_and(|s| s.success());
+        assert!(ok, "git init failed in the test's temp folder");
+        path
+    }
+
     /// A skill with the frontmatter `canon validate` asks for.
     pub fn skill(&self, rel: &str, name: &str) -> PathBuf {
         self.write(
@@ -74,6 +87,7 @@ pub fn source(root: &Path) -> Source {
         schema: root.join("rules.schema.json"),
         house: "house/*.md".to_string(),
         skills: root.join("skills"),
+        mcp: root.join("mcp.toml"),
     }
 }
 
@@ -112,6 +126,7 @@ pub fn config(source: Source, agents: Vec<Agent>, projects: Vec<PathBuf>) -> Con
     let path = source.root.join(crate::config::CONFIG_FILE);
     let shortcut = source.root.join(".shortcut-that-is-not-there");
     let claude_state = source.root.join(".claude-state-that-is-not-there.json");
+    let tokens = source.root.join(".tokens");
     Config {
         source,
         agents,
@@ -121,5 +136,6 @@ pub fn config(source: Source, agents: Vec<Agent>, projects: Vec<PathBuf>) -> Con
         // `~/.claude.json` are real paths on the machine running the suite.
         shortcut,
         claude_state,
+        tokens,
     }
 }

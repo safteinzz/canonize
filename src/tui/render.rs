@@ -12,6 +12,7 @@ use ratatui::widgets::{
 use super::alert::render_note;
 use super::confirm::render_confirm;
 use super::scope::render_scope;
+use super::server_form::render_server_form;
 use super::typed::render_typed;
 use super::widgets::wrapped_line_count;
 use super::wizard::render_wizard;
@@ -20,14 +21,12 @@ use crate::config::{RulesMode, SkillsMode, tilde};
 use crate::plan::{self, State};
 use crate::projects;
 
-const HINTS: &str =
-    "j/k agent · ↵ open its card · F fix every agent · D delete every agent's setup · ? help";
+const HINTS: &str = "j/k agent · ↵ open its card · F fix every agent · ? help";
 const CARD_HINTS: &str = "j/k line · ↵ f fix · d delete · esc back to the list · ? help";
-const SKILL_HINTS: &str =
-    "↵ toggle · a link… · d delete… · F link all · D delete all links · ? help";
+const SKILL_HINTS: &str = "↵ toggle · a link… · d delete… · F link all · ? help";
 /// `{open}` is ` · o open <file>` for the row's file, or nothing when it has none.
-const HOUSE_HINTS: &str =
-    "↵ toggle · a add… · d delete… · F fix broken · D delete all{open} · ? help";
+const HOUSE_HINTS: &str = "↵ toggle · a add… · d delete… · F fix broken{open} · ? help";
+const MCP_HINTS: &str = "↵ toggle · n new · e edit · D delete server · a add to… · d delete from… · F fix{open} · ? help";
 
 pub(super) fn ui(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -67,6 +66,7 @@ pub(super) fn ui(f: &mut Frame, app: &App) {
         }
         None if app.view == View::Skills => render_skills(f, chunks[1], app),
         None if app.view == View::Houses => render_houses(f, chunks[1], app),
+        None if app.view == View::Mcp => render_mcp(f, chunks[1], app),
         None => render_agents(f, chunks[1], app),
     }
     render_status(f, chunks[3], app);
@@ -76,6 +76,9 @@ pub(super) fn ui(f: &mut Frame, app: &App) {
     }
     if let Some(sc) = &app.scope {
         render_scope(f, area, sc);
+    }
+    if let (Some(form), Some(cfg)) = (&app.server_form, &app.cfg) {
+        render_server_form(f, area, form, &tilde(&cfg.source.mcp));
     }
     if let Some(c) = &app.confirm {
         render_confirm(f, area, c);
@@ -110,7 +113,7 @@ fn render_source(f: &mut Frame, area: Rect, app: &App) {
         }
     }
     if app.cfg.is_some() {
-        spans.push(Span::styled("  ·  e edit config", dim));
+        spans.push(Span::styled("  ·  E edit config", dim));
     }
     // The tabs on the left, where the canon is on the right, in one frame.
     let block = Block::default()
@@ -119,7 +122,7 @@ fn render_source(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     let cols = Layout::horizontal([
-        Constraint::Length(30),
+        Constraint::Length(42),
         Constraint::Length(9),
         Constraint::Min(0),
     ])
@@ -128,8 +131,9 @@ fn render_source(f: &mut Frame, area: Rect, app: &App) {
         View::Agents => 0,
         View::Skills => 1,
         View::Houses => 2,
+        View::Mcp => 3,
     };
-    let tabs = Tabs::new(vec!["Agents", "Skills", "Houses"])
+    let tabs = Tabs::new(vec!["Agents", "Skills", "Conventions", "MCPs"])
         .select(idx)
         .divider("│")
         .highlight_style(
@@ -454,6 +458,15 @@ fn detail_pane(app: &App, width: u16) -> Option<(Pane, u16)> {
             .collect();
         return Some((pane(app.prow, app.pcol)?, tallest(all)));
     }
+    if app.view == View::Mcp {
+        let cols = app.mcps.as_ref()?.servers.len();
+        let pane = |r: usize, c: usize| mcp_detail(app, app.house_row_at(r)?, c);
+        let all = (0..app.house_rows())
+            .flat_map(|r| (0..cols).map(move |c| (r, c)))
+            .filter_map(|(r, c)| pane(r, c))
+            .collect();
+        return Some((pane(app.mrow, app.mcol)?, tallest(all)));
+    }
     let (cfg, plan) = (app.cfg.as_ref()?, app.plan.as_ref()?);
     let rows: Vec<Option<usize>> = if app.view == View::Skills {
         plan.skill_rows().into_iter().map(Some).collect()
@@ -523,7 +536,7 @@ fn detail(app: &App, row: Option<usize>, col: usize) -> Option<Pane> {
             RulesMode::Off => "off".into(),
         },
         plan::Row::Loader => match agent.name.as_str() {
-            "claude" => "per project: `@CANON.md` in its CLAUDE.local.md (houses tab)".into(),
+            "claude" => "per project: `@CANON.md` in its CLAUDE.local.md (conventions tab)".into(),
             "pi" => "an extension that loads ./CANON.md".into(),
             "opencode" => "`\"instructions\": [\"CANON.md\"]` in opencode.json".into(),
             _ => "this agent has no way to load another file".into(),
@@ -610,6 +623,22 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
                     .and_then(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
                     .map_or(String::new(), |n| format!(" · o open {n}"));
                 HOUSE_HINTS.replace("{open}", &open)
+            } else if app.view == View::Mcp {
+                let file = match app.house_row_at(app.mrow) {
+                    Some(HouseRow::Agent(a)) => app
+                        .mcps
+                        .as_ref()
+                        .and_then(|m| m.cells.get(app.mcol)?.get(a))
+                        .map(|c| c.at.clone())
+                        .filter(|at| {
+                            at.is_file() && app.cfg.as_ref().is_some_and(|c| *at != c.claude_state)
+                        }),
+                    _ => None,
+                };
+                let open = file
+                    .and_then(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .map_or(String::new(), |n| format!(" · o open {n}"));
+                MCP_HINTS.replace("{open}", &open)
             } else if app.view == View::Skills {
                 SKILL_HINTS.to_string()
             } else if app.in_card {
@@ -624,7 +653,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The help, as one body for the reader box that `?` opens.
-pub(super) const HELP: &str = "canonize: one source of truth for your coding agents\n\n\nAgents   j/k agent · ↵ open its card · esc back to the list\n         in the card: f fix the line · d delete it\n         F fix every agent's setup · D delete it all\nSkills   j/k skill · h/l agent · ↵ toggle (link, unlink, or adopt an own one)\n         a link… · d delete… (this cell, row or column; an own skill itself)\n         F link every missing skill · D delete every skill link\nHouses   j/k agent or project · h/l house file · ↵ toggle an import\n         an agent's row: it reads the file in every project\n         a add… · d delete… (this cell, row or column)\n         F fix broken imports and CANON.md wiring · D delete all\n         o open the file the import sits in\nAnywhere tab switch · v validate your canon · e edit canonize.toml\n         r reload · ? help · q quit\n\nlinked   wired to your canon\nimported a house file is read there\nunwired  f wires it\nbroken   wired to the wrong thing; f repoints it\nforeign  something of yours or the agent's; left alone\nn/a      the agent has no way to use it\noff, -   turned off, or the agent is not installed\nown      a skill the agent keeps itself; f adopts it into your canon\n";
+pub(super) const HELP: &str = "canonize: one source of truth for your coding agents\n\n\nAgents   j/k agent · ↵ open its card · esc back to the list\n         in the card: f fix the line · d delete it\n         F fix every agent's setup\nSkills   j/k skill · h/l agent · ↵ toggle (link, unlink, or adopt an own one)\n         a link… · d delete… (this cell, row or column; an own skill itself)\n         F link every missing skill\nConventions\n         j/k agent or project · h/l convention · ↵ toggle an import\n         an agent's row: it reads the file in every project\n         a add… · d delete… (this cell, row or column)\n         F fix broken imports and CANON.md wiring\n         o open the file the import sits in\nMCPs     j/k agent or project · h/l server · ↵ toggle a server\n         n a new server, written into your canon's mcp.toml\n         e edit the server, or give it a new token\n         an agent's row: its own config, for every project\n         a add to… · d delete from… (this cell, row or column)\n         F rewrite what differs from your canon\n         D delete the server from your canon, and its token\nAnywhere tab switch · v validate your canon · E edit canonize.toml\n         r reload · ? help · q quit\n\nlinked   wired to your canon\nimported a convention is read there\nadded    an MCP server is in that agent's config\nunwired  f wires it\nbroken   wired to the wrong thing; f repoints it\nforeign  something of yours or the agent's; left alone\nn/a      the agent has no way to use it\noff, -   turned off, or the agent is not installed\nown      a skill the agent keeps itself; f adopts it into your canon\n";
 
 /// A house cell's word: `imported` for one that is wired, `-` for one that
 /// is not, since neither needs fixing.
@@ -639,29 +668,126 @@ fn house_word(s: &State) -> &'static str {
 /// The houses tab: a column per house file, and a row per place one can be
 /// imported, every agent (for every project) above every project.
 fn render_houses(f: &mut Frame, area: Rect, app: &App) {
-    let (Some(cfg), Some(h), Some(p)) = (&app.cfg, &app.houses, &app.projects) else {
+    let (Some(h), Some(p)) = (&app.houses, &app.projects) else {
         return;
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" houses · who reads which house file ");
-    let dim = Style::default().add_modifier(Modifier::DIM);
+        .title(" conventions · who reads which ");
     if h.house.is_empty() {
         let para = Paragraph::new(
-            "No house files yet: put a HOUSE-<NAME>.md in your canon's house/, then import it here into an agent, for every project, or into a project.",
+            "No conventions yet: put a CONVENTIONS-<NAME>.md in your canon's conventions/, then import it here into an agent, for every project, or into a project.",
         )
-        .style(dim)
+        .style(Style::default().add_modifier(Modifier::DIM))
         .block(block)
         .wrap(Wrap { trim: false });
         f.render_widget(para, area);
         return;
     }
+    let cols = h.house.iter().map(|x| crate::cli::house_label(x)).collect();
+    let states = |row: HouseRow| -> Vec<&State> {
+        match row {
+            HouseRow::Agent(a) => h.cells.iter().map(|r| &r[a].state).collect(),
+            HouseRow::Project(i) => p.list[i].cells.iter().map(|c| &c.state).collect(),
+        }
+    };
+    let grid = Places {
+        block,
+        cols,
+        word: house_word,
+        at: (app.prow, app.pcol),
+        top: &app.ptop,
+    };
+    render_places(f, area, app, grid, states);
+}
+
+/// The MCP tab: a column per server in the canon, over the houses tab's rows.
+fn render_mcp(f: &mut Frame, area: Rect, app: &App) {
+    let (Some(cfg), Some(m)) = (&app.cfg, &app.mcps) else {
+        return;
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" mcps · who has which server ");
+    if m.servers.is_empty() {
+        let (text, style) = match &m.error {
+            Some(e) => (
+                format!("{e}\n\nFix it, then r reloads."),
+                Style::default().fg(Color::Yellow),
+            ),
+            None if cfg.source.mcp.as_os_str().is_empty() => (
+                "MCP servers are turned off: `mcp` is \"\" in canonize.toml (E).".to_string(),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+            None => (
+                format!(
+                    "No MCP servers yet: n describes one and writes it into {}, then ↵ adds it here to an agent, for every project, or to a project.",
+                    tilde(&cfg.source.mcp)
+                ),
+                Style::default().add_modifier(Modifier::DIM),
+            ),
+        };
+        let para = Paragraph::new(text)
+            .style(style)
+            .block(block)
+            .wrap(Wrap { trim: false });
+        f.render_widget(para, area);
+        return;
+    }
+    let cols = m.servers.iter().map(|s| s.name.clone()).collect();
+    let states = |row: HouseRow| -> Vec<&State> {
+        match row {
+            HouseRow::Agent(a) => m.cells.iter().map(|r| &r[a].state).collect(),
+            HouseRow::Project(i) => m.projects[i].iter().map(|c| &c.state).collect(),
+        }
+    };
+    let grid = Places {
+        block,
+        cols,
+        word: crate::cli::mcp_word,
+        at: (app.mrow, app.mcol),
+        top: &app.mtop,
+    };
+    render_places(f, area, app, grid, states);
+}
+
+/// What a grid of places shows: its frame, a column per `cols`, each cell as
+/// `word` of its state, with `at` (row, column) selected and `top` the first
+/// row on screen.
+struct Places<'t> {
+    block: Block<'static>,
+    cols: Vec<String>,
+    word: fn(&State) -> &'static str,
+    at: (usize, usize),
+    top: &'t Kept<usize>,
+}
+
+/// A grid of places something can go: a row per agent (for every project)
+/// above a row per project, with `states` giving a row's cells.
+fn render_places<'a>(
+    f: &mut Frame,
+    area: Rect,
+    app: &'a App,
+    grid: Places,
+    states: impl Fn(HouseRow) -> Vec<&'a State>,
+) {
+    let Places {
+        block,
+        cols,
+        word,
+        at,
+        top,
+    } = grid;
+    let (Some(cfg), Some(p)) = (&app.cfg, &app.projects) else {
+        return;
+    };
+    let dim = Style::default().add_modifier(Modifier::DIM);
     // The agents' section title sits on the header row, as in `canon status`.
     let title = "every project";
-    let names: Vec<String> = cfg
-        .agents
-        .iter()
-        .map(|a| format!("  {}", a.name))
+    let names: Vec<String> = app
+        .grid_agents()
+        .into_iter()
+        .map(|a| format!("  {}", cfg.agents[a].name))
         .chain(
             p.list
                 .iter()
@@ -676,8 +802,7 @@ fn render_houses(f: &mut Frame, area: Rect, app: &App) {
         .max(title.chars().count() + 1) as u16;
     let mut header = vec![Cell::from(title).style(dim)];
     let mut widths = vec![Constraint::Length(label_w + 1)];
-    for house in &h.house {
-        let label = crate::cli::house_label(house);
+    for label in cols {
         widths.push(Constraint::Length(label.chars().count().max(10) as u16 + 2));
         header.push(Cell::from(label).style(Style::default().add_modifier(Modifier::BOLD)));
     }
@@ -686,48 +811,38 @@ fn render_houses(f: &mut Frame, area: Rect, app: &App) {
     // The display row of the selection, past the section lines above it.
     let mut selected = 0;
     for (r, name) in names.iter().enumerate() {
-        let (label, states): (Style, Vec<&State>) = match app.house_row_at(r) {
-            Some(HouseRow::Agent(a)) => (
-                if cfg.agents[a].active() {
-                    Style::default()
-                } else {
-                    dim
-                },
-                h.cells.iter().map(|row| &row[a].state).collect(),
-            ),
-            Some(HouseRow::Project(i)) => {
-                if i == 0 {
-                    rows.push(section(""));
-                    rows.push(section("projects"));
-                }
-                (
-                    Style::default(),
-                    p.list[i].cells.iter().map(|c| &c.state).collect(),
-                )
-            }
-            None => continue,
+        let Some(row) = app.house_row_at(r) else {
+            continue;
         };
-        if r == app.prow {
+        let label = match row {
+            HouseRow::Project(0) => {
+                rows.push(section(""));
+                rows.push(section("projects"));
+                Style::default()
+            }
+            _ => Style::default(),
+        };
+        if r == at.0 {
             selected = rows.len();
         }
         let mut cells = vec![Cell::from(name.clone()).style(label)];
-        for (c, state) in states.into_iter().enumerate() {
+        for (c, state) in states(row).into_iter().enumerate() {
             let mut style = if *state == State::Missing {
                 dim
             } else {
                 state_style(state)
             };
-            if r == app.prow && c == app.pcol {
+            if r == at.0 && c == at.1 {
                 style = style.add_modifier(Modifier::REVERSED);
             }
-            cells.push(Cell::from(format!(" {} ", house_word(state))).style(style));
+            cells.push(Cell::from(format!(" {} ", word(state))).style(style));
         }
         rows.push(Row::new(cells));
     }
     if p.list.is_empty() {
         rows.push(section(""));
         rows.push(section(if cfg.projects.is_empty() {
-            "projects: none yet, add `projects = [\"~/dev\"]` to canonize.toml (e)"
+            "projects: none yet, add `projects = [\"~/dev\"]` to canonize.toml (E)"
         } else {
             "projects: none under your project folders has a CLAUDE.md or AGENTS.md"
         }));
@@ -736,7 +851,7 @@ fn render_houses(f: &mut Frame, area: Rect, app: &App) {
     let table = Table::new(rows, widths)
         .header(Row::new(header))
         .block(block);
-    render_grid(f, area, table, 1, total, selected, &app.ptop);
+    render_grid(f, area, table, 1, total, selected, top);
 }
 
 /// Agent `a`'s import of house file `col` spelled out.
@@ -761,7 +876,7 @@ fn house_detail(app: &App, a: usize, col: usize) -> Option<Pane> {
             state_style(&cell.state),
         ),
     ])];
-    lines.push(field("house", tilde(house)));
+    lines.push(field("file", tilde(house)));
     if !matches!(cell.state, State::Na | State::Absent) {
         lines.push(field("at", tilde(&cell.at)));
     }
@@ -813,7 +928,7 @@ fn project_detail(app: &App, prow: usize, pcol: usize) -> Option<Pane> {
     // Named by its key, because the import itself lives in CANON.md and a row
     // saying `file` beside it reads as the file the import sits in.
     lines.push(field("o opens", tilde(&x.host)));
-    lines.push(field("house", tilde(h)));
+    lines.push(field("file", tilde(h)));
     // What Enter does for this cell, named by its verb like the skills tab.
     let toggle = if cell.state == State::Linked {
         cell.undo.as_ref()
@@ -858,4 +973,97 @@ fn project_detail(app: &App, prow: usize, pcol: usize) -> Option<Pane> {
         crate::cli::house_label(h)
     );
     Some(Pane { title, lines })
+}
+
+/// Server `col` in row `row` of the MCP tab spelled out: what the server is,
+/// where the entry lives, and what Enter would do.
+fn mcp_detail(app: &App, row: HouseRow, col: usize) -> Option<Pane> {
+    let (cfg, m, p) = (
+        app.cfg.as_ref()?,
+        app.mcps.as_ref()?,
+        app.projects.as_ref()?,
+    );
+    let server = m.servers.get(col)?;
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let field =
+        |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<17}"), dim), Span::raw(v)]);
+    let (who, state, change, undo, at) = match row {
+        HouseRow::Agent(a) => {
+            let c = m.cells.get(col)?.get(a)?;
+            let at = (!matches!(c.state, State::Na | State::Absent)).then(|| tilde(&c.at));
+            (
+                cfg.agents.get(a)?.name.clone(),
+                &c.state,
+                &c.change,
+                &c.undo,
+                at,
+            )
+        }
+        HouseRow::Project(i) => {
+            let c = m.projects.get(i)?.get(col)?;
+            let x = p.list.get(i)?;
+            (
+                projects::short(cfg, &x.root),
+                &c.state,
+                &c.change,
+                &c.undo,
+                Some(format!("{}, every agent", tilde(&x.root))),
+            )
+        }
+    };
+    let word = crate::cli::mcp_word(state);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(format!("{:<17}", "state"), dim),
+        Span::styled(
+            match state.why() {
+                Some(why) => format!("{word}: {why}"),
+                None if *state == State::Missing => "not added".to_string(),
+                None if *state == State::Na => {
+                    "this agent has no MCP config canonize knows".to_string()
+                }
+                None => word.to_string(),
+            },
+            state_style(state),
+        ),
+    ])];
+    lines.push(field("server", server.summary()));
+    let vars = server.vars();
+    if !vars.is_empty() {
+        let unset: Vec<&str> = vars
+            .iter()
+            .copied()
+            .filter(|v| std::env::var_os(v).is_none_or(|x| x.is_empty()))
+            .collect();
+        let mut text = vars.join(", ");
+        if !unset.is_empty() {
+            text.push_str(&format!(" (not set here: {})", unset.join(", ")));
+        }
+        lines.push(field("reads", text));
+    }
+    if let Some(kept) = server.kept() {
+        lines.push(field(
+            "token",
+            if kept.is_file() {
+                "kept outside your canon · e replaces it".to_string()
+            } else {
+                "none yet · e sets one".to_string()
+            },
+        ));
+    }
+    if let Some(at) = at {
+        lines.push(field("at", at));
+    }
+    let toggle = if *state == State::Linked {
+        undo
+    } else {
+        change
+    };
+    match toggle {
+        Some(c) => lines.push(field(&format!("↵ {}", c.verb()), c.describe())),
+        None => lines.push(field("↵", "nothing to do".to_string())),
+    }
+    Some(Pane {
+        title: format!(" {who} · {} ", server.name),
+        lines,
+    })
 }

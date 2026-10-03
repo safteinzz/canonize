@@ -68,12 +68,12 @@ impl Approval {
         match self {
             Approval::Approved => None,
             Approval::NotAsked => Some(
-                "Claude reads no house file here until you open `claude` in it once and allow external imports".to_string(),
+                "Claude reads no convention here until you open `claude` in it once and allow external imports".to_string(),
             ),
             // Claude never asks again and has no command to undo a no, so its
             // own file is the only way back.
             Approval::Declined => Some(format!(
-                "you told Claude not to load files outside this project, so it reads no house file here: with Claude closed, set `hasClaudeMdExternalIncludesApproved` to `true` under `projects` > `{}` in {}",
+                "you told Claude not to load files outside this project, so it reads no convention here: with Claude closed, set `hasClaudeMdExternalIncludesApproved` to `true` under `projects` > `{}` in {}",
                 p.claude_key.display(),
                 tilde(&cfg.claude_state)
             )),
@@ -383,22 +383,27 @@ fn approvals(cfg: &Config, claude: bool) -> Option<serde_json::Value> {
     Some(doc.get_mut("projects")?.take())
 }
 
-/// What Claude recorded for project `p`, which it files under the git repo's
-/// root (checked against Claude Code 2.1.287), else the folder it was opened in.
-fn approval(projects: &serde_json::Value, p: &mut Project) -> Approval {
-    let top = std::process::Command::new("git")
+/// The folder Claude Code files a project under in its state file, for the
+/// import approval and for local MCP servers alike: the root of the git repo
+/// the project sits in, else the folder itself (checked against 2.1.287).
+pub fn claude_key(root: &Path) -> PathBuf {
+    std::process::Command::new("git")
         .arg("-C")
-        .arg(&p.root)
+        .arg(root)
         .args(["rev-parse", "--show-toplevel"])
         .stderr(std::process::Stdio::null())
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
+        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
+        .unwrap_or_else(|| root.to_path_buf())
+}
+
+/// What Claude recorded for project `p`.
+fn approval(projects: &serde_json::Value, p: &mut Project) -> Approval {
     let real = fs::canonicalize(&p.root).ok();
-    let keys: Vec<PathBuf> = top
+    let keys: Vec<PathBuf> = [claude_key(&p.root), p.root.clone()]
         .into_iter()
-        .chain([p.root.clone()])
         .chain(real)
         .collect();
     p.claude_key = keys[0].clone();
@@ -469,16 +474,7 @@ fn claude_wiring(root: &Path) -> Vec<Wire> {
     let what = format!("`{canon_line}` in {LOCAL_FILE}");
 
     let link = fs::symlink_metadata(&local).is_ok_and(|m| m.file_type().is_symlink());
-    let tracked = !link
-        && text.is_some()
-        && std::process::Command::new("git")
-            .arg("-C")
-            .arg(root)
-            .args(["ls-files", "--error-unmatch", LOCAL_FILE])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
+    let tracked = !link && text.is_some() && tracked(root, LOCAL_FILE);
     if link || tracked {
         let why = if link {
             format!(
@@ -593,11 +589,36 @@ fn claude_wiring(root: &Path) -> Vec<Wire> {
     out
 }
 
+/// Whether `root` is inside a git repo, at its root or below it: git reads a
+/// `.gitignore` in any folder of it.
+pub fn in_git(root: &Path) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Whether git tracks `rel` in the project at `root`.
+pub fn tracked(root: &Path, rel: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--error-unmatch", rel])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// `name` kept out of git by the project's `.gitignore`; the line goes back
 /// only when `ours` says the file it was added for is canonize's alone.
-fn ignored(root: &Path, name: &str, ours: bool) -> Wire {
+pub fn ignored(root: &Path, name: &str, ours: bool) -> Wire {
     let what = format!("{name} kept out of git");
-    if !root.join(".git").exists() {
+    if !in_git(root) {
         return Wire {
             what,
             state: State::Na,
@@ -810,7 +831,7 @@ mod tests {
     #[test]
     fn a_project_with_only_agents_md_keeps_claude_reading_it_once_house_files_go_in() {
         let (t, cfg, _) = world();
-        t.dir("dev/app/.git");
+        t.git("dev/app");
         t.write("dev/app/AGENTS.md", "# app\n");
 
         let project = only(&cfg);
@@ -866,7 +887,7 @@ mod tests {
     #[test]
     fn taking_everything_back_leaves_a_claude_local_md_the_user_wrote() {
         let (t, cfg, _) = world();
-        t.dir("dev/app/.git");
+        t.git("dev/app");
         t.write("dev/app/AGENTS.md", "# app\n");
         t.write("dev/app/CLAUDE.local.md", "my sandbox is example.com\n");
         t.write("dev/app/.gitignore", "CLAUDE.local.md\n");
@@ -894,7 +915,7 @@ mod tests {
     #[test]
     fn taking_everything_back_deletes_the_claude_local_md_canonize_started() {
         let (t, cfg, _) = world();
-        t.dir("dev/app/.git");
+        t.git("dev/app");
         t.write("dev/app/AGENTS.md", "# app\n");
 
         let project = only(&cfg);

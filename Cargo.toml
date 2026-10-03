@@ -3,7 +3,7 @@ name = "canonize"
 version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
-description = "bring your rules to any coding agent - one canon of rules, house files and skills for the agents you use"
+description = "bring your rules to any coding agent - one canon of rules, conventions and skills for the agents you use"
 authors = ["Pablo Antonio Hernández Hernández (safteinzz)"]
 license = "AGPL-3.0-only"
 readme = "README.md"
@@ -29,6 +29,7 @@ colored    = "2"                                        # colored CLI output
 dirs       = "5"                                        # locate the home and config dirs portably
 serde      = { version = "1", features = ["derive"] }  # config and rules parsing
 toml       = "0.8"                                      # canonize.toml
+toml_edit  = "0.22"                                     # codex's config.toml, edited with its comments kept
 serde_yaml = "0.9"                                      # the rules file
-serde_json = "1"                                        # the rules schema
+serde_json = { version = "1", features = ["preserve_order"] }  # the rules schema; agents' JSON configs keep their key order
 jsonschema = { version = "0.33", default-features = false }  # validating the rules file, no network resolver
