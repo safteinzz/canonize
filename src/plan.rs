@@ -365,9 +365,9 @@ impl Change {
                 .collect::<Vec<_>>()
                 .join("\n"),
             Change::MoveImport { from, old, to, new } => format!(
-                "sed -i '\\#^{old}$#d' {}\necho '{new}' >> {}",
-                tilde(from),
-                tilde(to)
+                "echo '{new}' >> {}\nsed -i '\\#^{old}$#d' {}",
+                tilde(to),
+                tilde(from)
             ),
             Change::WriteFile { file, what, .. } => {
                 format!("cat > {} <<'EOF'   # {what}", tilde(file))

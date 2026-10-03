@@ -152,6 +152,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "signal-hook",
  "toml",
  "toml_edit",
 ]

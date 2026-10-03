@@ -172,12 +172,14 @@ fn val(key: &str, s: &str) -> Result<Val> {
 }
 
 fn server(name: &str, r: RawServer, tokens: &Path) -> Result<Server> {
-    if name.is_empty()
+    if !name.starts_with(|c: char| c.is_ascii_alphabetic())
         || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        bail!("the name takes only letters, digits, `_` and `-`, which is all every agent accepts");
+        bail!(
+            "the name starts with a letter and takes only letters, digits, `_` and `-`, which is all every agent accepts"
+        );
     }
     let spec = match (r.url, r.command) {
         (Some(_), Some(_)) => bail!("it has both `url` and `command`: keep the one it is"),
@@ -298,7 +300,33 @@ pub fn define(file: &Path, name: &str, spec: &Spec, new: bool) -> Result<()> {
 /// else.
 pub fn undefine(file: &Path, name: &str, token: Option<&Path>) -> Result<()> {
     let mut doc = read_toml(file)?;
-    if doc.remove(name).is_some() {
+    let keys: Vec<String> = doc.iter().map(|(k, _)| k.to_string()).collect();
+    let next = keys
+        .iter()
+        .position(|k| k == name)
+        .and_then(|i| keys.get(i + 1).cloned());
+    if let Some(gone) = doc.remove(name) {
+        let kept = gone
+            .as_table()
+            .map_or(String::new(), |t| loose_comments(t.decor()));
+        if !kept.is_empty() {
+            match next.as_deref().and_then(|n| doc.get_mut(n)?.as_table_mut()) {
+                Some(t) => {
+                    let after = t
+                        .decor()
+                        .prefix()
+                        .and_then(|p| p.as_str())
+                        .unwrap_or_default();
+                    // `kept` ends on the blank line that set it apart already.
+                    let joined = format!("{kept}{}", after.trim_start_matches('\n'));
+                    t.decor_mut().set_prefix(joined);
+                }
+                None => {
+                    let after = doc.trailing().as_str().unwrap_or_default().to_string();
+                    doc.set_trailing(format!("{kept}{after}"));
+                }
+            }
+        }
         write(file, doc.to_string())?;
     }
     if let Some(t) = token
@@ -307,6 +335,18 @@ pub fn undefine(file: &Path, name: &str, token: Option<&Path>) -> Result<()> {
         fs::remove_file(t).with_context(|| format!("could not delete `{}`", tilde(t)))?;
     }
     Ok(())
+}
+
+/// The comments above a table that are not the table's own: whatever stands
+/// before its last blank line, such as a file's header. toml_edit keeps them
+/// as part of the table, so they would go with it; a comment right above the
+/// table, with no blank line between, describes it and goes with it.
+fn loose_comments(decor: &toml_edit::Decor) -> String {
+    let prefix = decor.prefix().and_then(|p| p.as_str()).unwrap_or_default();
+    match prefix.rfind("\n\n") {
+        Some(i) if prefix[..i].contains('#') => prefix[..i + 2].to_string(),
+        _ => String::new(),
+    }
 }
 
 /// A token as RFC 6750 spells one, which every agent can carry in a header
@@ -1007,27 +1047,20 @@ pub fn remove(at: &Where, name: &str, in_project: bool) -> Result<()> {
         }
         Where::Codex(f) => {
             let mut doc = read_toml(f)?;
-            // toml_edit keeps the comments above a table as part of it, so
-            // they are taken out of the table before it goes and kept.
             let mut kept = String::new();
             if let Some(servers) = doc
                 .get_mut("mcp_servers")
                 .and_then(toml_edit::Item::as_table_mut)
             {
                 if let Some(t) = servers.get(name).and_then(toml_edit::Item::as_table) {
-                    kept = t
-                        .decor()
-                        .prefix()
-                        .and_then(|p| p.as_str())
-                        .unwrap_or_default()
-                        .to_string();
+                    kept = loose_comments(t.decor());
                 }
                 servers.remove(name);
                 if servers.is_empty() {
                     doc.remove("mcp_servers");
                 }
             }
-            if kept.trim_start().starts_with('#') {
+            if !kept.is_empty() {
                 let after = doc.trailing().as_str().unwrap_or_default().to_string();
                 doc.set_trailing(format!("{kept}{after}"));
             }
@@ -1198,8 +1231,12 @@ pub fn command(at: &Where, name: &str, spec: Option<&Spec>) -> String {
             } else {
                 "<(echo '{}')".to_string()
             };
+            let mkdir = match f.parent() {
+                Some(d) if !d.exists() => format!("mkdir -p {} && ", tilde(d)),
+                _ => String::new(),
+            };
             format!(
-                "jq {} {input} > {f}.new && mv {f}.new {f}",
+                "{mkdir}jq {} {input} > {f}.new && mv {f}.new {f}",
                 sh_word(&jq),
                 f = tilde(f)
             )
@@ -1221,6 +1258,9 @@ pub struct Mcps {
     pub cells: Vec<Vec<Cell>>,
     /// Per project, in the order of `Projects::list`, its cell per server.
     pub projects: Vec<Vec<projects::Cell>>,
+    /// Per project, whether Claude is left out of its cells, since it keeps
+    /// one list for the whole git repo the project sits below the root of.
+    pub shared: Vec<bool>,
 }
 
 /// Where `agent` keeps a server: its global config, or with `project` (the
@@ -1305,14 +1345,19 @@ fn entry(at: &Where, server: &Server, in_project: bool, claude: Option<&Value>) 
 /// `Err` says why an agent's project file is refused.
 type Slot = (String, Result<(Where, Option<Change>, bool), String>);
 
-fn slots(cfg: &Config, root: &Path) -> Vec<Slot> {
+/// Each agent's slot in the project at `root`, and whether Claude is left out
+/// because the project sits below its git repo's root.
+fn slots(cfg: &Config, root: &Path) -> (Vec<Slot>, bool) {
     let key = projects::claude_key(root);
-    cfg.agents
+    // git names the root by its real path, which a linked project folder is not.
+    let shared = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()) != key;
+    let slots = cfg
+        .agents
         .iter()
         .filter(|a| a.active())
         // Claude keeps one list per git repo, so a project below its repo's
         // root shares it with every other project there and gets no say in it.
-        .filter(|a| a.name != "claude" || key == root)
+        .filter(|a| a.name != "claude" || !shared)
         .filter_map(|agent| {
             let (at, rel) = place(cfg, agent, Some((root, &key)))?;
             let Some(rel) = rel else {
@@ -1331,7 +1376,9 @@ fn slots(cfg: &Config, root: &Path) -> Vec<Slot> {
             };
             Some((agent.name.clone(), slot))
         })
-        .collect()
+        .collect();
+    let claude = cfg.agents.iter().any(|a| a.name == "claude" && a.active());
+    (slots, shared && claude)
 }
 
 /// One project's cell for `server`, over every agent that can take it: added
@@ -1359,15 +1406,14 @@ fn project_cell(
     }
     if subs.is_empty() {
         return projects::Cell {
-            state: if refused.is_empty() {
-                State::Na
-            } else {
-                State::Foreign(refused.join("; "))
-            },
+            state: State::Na,
             change: None,
             undo: None,
         };
     }
+    // Claude's step last: it needs `claude` on PATH, and a batch stops at its
+    // first failure, so every other agent is written before it.
+    subs.sort_by_key(|(a, _, _)| *a == "claude");
     let changes: Vec<Change> = subs
         .iter()
         .filter(|(_, c, _)| c.state != State::Linked)
@@ -1384,7 +1430,14 @@ fn project_cell(
             _ => Some(Change::Batch { what, changes }),
         }
     };
-    let state = if subs.iter().all(|(_, c, _)| c.state == State::Linked) {
+    let wanted = subs
+        .iter()
+        .any(|(_, c, _)| matches!(c.state, State::Linked | State::Broken(_)));
+    // A file canonize may not write only matters once the server is wanted
+    // here: before that it is no more than an agent that cannot take it.
+    let state = if wanted && !refused.is_empty() {
+        State::Foreign(format!("not added for {}", refused.join("; ")))
+    } else if subs.iter().all(|(_, c, _)| c.state == State::Linked) {
         State::Linked
     } else if subs.iter().all(|(_, c, _)| c.state == State::Missing) {
         State::Missing
@@ -1459,25 +1512,27 @@ impl Mcps {
                     .collect()
             })
             .collect();
-        let projects = projects
+        let (projects, shared) = projects
             .list
             .iter()
             .map(|p| {
                 if servers.is_empty() {
-                    return Vec::new();
+                    return (Vec::new(), false);
                 }
-                let slots = slots(cfg, &p.root);
-                servers
+                let (slots, shared) = slots(cfg, &p.root);
+                let cells = servers
                     .iter()
                     .map(|s| project_cell(&p.root, &slots, s, claude))
-                    .collect()
+                    .collect();
+                (cells, shared)
             })
-            .collect();
+            .unzip();
         Mcps {
             servers,
             error,
             cells,
             projects,
+            shared,
         }
     }
 
@@ -1770,6 +1825,13 @@ mod tests {
             "{text}"
         );
         assert!(!token.exists(), "its kept token goes with it");
+
+        undefine(&file, "docs", None).expect("the first server should go too");
+        let text = fs::read_to_string(&file).expect("mcp.toml should be there");
+        assert!(
+            text.contains("# my servers"),
+            "the file's own header outlives its first table: {text}"
+        );
     }
 
     #[test]

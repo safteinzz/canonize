@@ -220,9 +220,15 @@ fn build(root: &Path, raw: RawConfig, path: PathBuf) -> Result<Config> {
         root: root.to_path_buf(),
         rules: rel(raw.source.rules, "rules.yaml"),
         schema: rel(raw.source.schema, "rules.schema.json"),
-        // `house/`, the folder before 0.3.0, until there is a `conventions/`.
+        // `house/`, the folder before 0.3.0, until `conventions/` holds one:
+        // `canon init` makes an empty `conventions/` in a canon that has both.
         house: raw.source.conventions.unwrap_or_else(|| {
-            if !root.join("conventions").exists() && root.join("house").is_dir() {
+            let has_md = |dir: &str| {
+                fs::read_dir(root.join(dir)).is_ok_and(|mut d| {
+                    d.any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().ends_with(".md")))
+                })
+            };
+            if !has_md("conventions") && has_md("house") {
                 "house/*.md".to_string()
             } else {
                 "conventions/*.md".to_string()
@@ -519,6 +525,20 @@ mod tests {
                     .into_owned()
             })
             .collect()
+    }
+
+    #[test]
+    fn an_empty_conventions_folder_does_not_hide_a_canon_s_house_files() {
+        let t = Temp::new();
+        t.write("canon/house/HOUSE-RUST.md", "# rust\n");
+        t.write("canon/canonize.toml", "[source]\nrules = \"\"\n");
+        t.dir("canon/conventions");
+        let cfg = load_from(&t.at("canon")).expect("the config should load");
+        assert_eq!(
+            house_files(&cfg.source).len(),
+            1,
+            "`canon init` makes an empty conventions/ in an old canon, which must not hide house/"
+        );
     }
 
     #[test]

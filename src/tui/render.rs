@@ -653,7 +653,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The help, as one body for the reader box that `?` opens.
-pub(super) const HELP: &str = "canonize: one source of truth for your coding agents\n\n\nAgents   j/k agent · ↵ open its card · esc back to the list\n         in the card: f fix the line · d delete it\n         F fix every agent's setup\nSkills   j/k skill · h/l agent · ↵ toggle (link, unlink, or adopt an own one)\n         a link… · d delete… (this cell, row or column; an own skill itself)\n         F link every missing skill\nConventions\n         j/k agent or project · h/l convention · ↵ toggle an import\n         an agent's row: it reads the file in every project\n         a add… · d delete… (this cell, row or column)\n         F fix broken imports and CANON.md wiring\n         o open the file the import sits in\nMCPs     j/k agent or project · h/l server · ↵ toggle a server\n         n a new server, written into your canon's mcp.toml\n         e edit the server, or give it a new token\n         an agent's row: its own config, for every project\n         a add to… · d delete from… (this cell, row or column)\n         F rewrite what differs from your canon\n         D delete the server from your canon, and its token\nAnywhere tab switch · v validate your canon · E edit canonize.toml\n         r reload · ? help · q quit\n\nlinked   wired to your canon\nimported a convention is read there\nadded    an MCP server is in that agent's config\nunwired  f wires it\nbroken   wired to the wrong thing; f repoints it\nforeign  something of yours or the agent's; left alone\nn/a      the agent has no way to use it\noff, -   turned off, or the agent is not installed\nown      a skill the agent keeps itself; f adopts it into your canon\n";
+pub(super) const HELP: &str = "canonize: one source of truth for your coding agents\n\n\nAgents   j/k agent · ↵ open its card · esc back to the list\n         in the card: f fix the line · d delete it\n         F fix every agent's setup\nSkills   j/k skill · h/l agent · ↵ toggle (link, unlink, or adopt an own one)\n         a link… · d delete… (this cell, row or column; an own skill itself)\n         F link every missing skill\nConventions\n         j/k agent or project · h/l convention · ↵ toggle an import\n         an agent's row: it reads the file in every project\n         a add… · d delete… (this cell, row or column)\n         F fix broken imports and CANON.md wiring\n         o open the file the import sits in\nMCPs     j/k agent or project · h/l server · ↵ toggle a server\n         n a new server, written into your canon's mcp.toml\n         e edit the server, or give it a new token\n         an agent's row: its own config, for every project\n         a add to… · d delete from… (this cell, row or column)\n         F rewrite what differs from your canon\n         D delete the server from your canon, and its token\nAnywhere tab switch · v validate your canon · E edit canonize.toml\n         r reload · ? help · q quit\n\nlinked   wired to your canon\nimported a convention is read there\nadded    an MCP server is in that agent's config\nunwired  f wires it\nbroken   wired to the wrong thing; f repoints it\nforeign  something of yours or the agent's; left alone\nn/a      the agent has no way to use it\noff      turned off\n-        not installed (agents tab); not there (conventions, MCPs)\nown      a skill the agent keeps itself; f adopts it into your canon\n";
 
 /// A house cell's word: `imported` for one that is wired, `-` for one that
 /// is not, since neither needs fixing.
@@ -1011,6 +1011,10 @@ fn mcp_detail(app: &App, row: HouseRow, col: usize) -> Option<Pane> {
             )
         }
     };
+    let shared = match row {
+        HouseRow::Project(i) => m.shared.get(i) == Some(&true),
+        HouseRow::Agent(_) => false,
+    };
     let word = crate::cli::mcp_word(state);
     let mut lines = vec![Line::from(vec![
         Span::styled(format!("{:<17}", "state"), dim),
@@ -1052,6 +1056,12 @@ fn mcp_detail(app: &App, row: HouseRow, col: usize) -> Option<Pane> {
     }
     if let Some(at) = at {
         lines.push(field("at", at));
+    }
+    if shared {
+        lines.push(Line::styled(
+            "not for Claude: it keeps one list for the whole git repo, on the repo's own row",
+            dim,
+        ));
     }
     let toggle = if *state == State::Linked {
         undo

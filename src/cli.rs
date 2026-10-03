@@ -345,6 +345,8 @@ struct Foreign {
     agent: Option<String>,
     kind: &'static str,
     name: String,
+    /// The project it is in, when it is in one.
+    project: Option<PathBuf>,
     /// How `status` names it.
     who: String,
     why: String,
@@ -368,6 +370,7 @@ fn foreign_elsewhere(
                     agent: Some(cfg.agents[a].name.clone()),
                     kind: "convention",
                     name: house_label(h),
+                    project: None,
                     who: format!("{} {}", cfg.agents[a].name, house_label(h)),
                     why: why.clone(),
                 });
@@ -381,6 +384,7 @@ fn foreign_elsewhere(
                     agent: Some(cfg.agents[a].name.clone()),
                     kind: "mcp",
                     name: s.name.clone(),
+                    project: None,
                     who: format!("{} {}", cfg.agents[a].name, s.name),
                     why: why.clone(),
                 });
@@ -398,6 +402,7 @@ fn foreign_elsewhere(
                     agent: None,
                     kind: "mcp",
                     name: s.name.clone(),
+                    project: Some(p.root.clone()),
                     who: format!("{short} {}", s.name),
                     why: why.clone(),
                 });
@@ -409,7 +414,8 @@ fn foreign_elsewhere(
                     out.push(Foreign {
                         agent: Some("claude".into()),
                         kind: "project",
-                        name: short.clone(),
+                        name: p.root.display().to_string(),
+                        project: Some(p.root.clone()),
                         who: short.clone(),
                         why: why.clone(),
                     });
@@ -593,6 +599,7 @@ fn status_json(
                 "agent": cfg.agents[a].name,
                 "kind": plan.rows[r].kind(),
                 "name": plan.rows[r].name(),
+                "project": null,
                 "state": plan.cells[r][a].state.id(),
                 "why": plan.cells[r][a].state.why(),
                 "advice": advice(cfg, plan, r, a),
@@ -607,6 +614,7 @@ fn status_json(
                     "agent": f.agent,
                     "kind": f.kind,
                     "name": f.name,
+                    "project": f.project,
                     "state": "foreign",
                     "why": f.why,
                     "advice": f.why,
@@ -619,6 +627,7 @@ fn status_json(
                 "agent": "claude",
                 "kind": "project",
                 "name": p.root,
+                "project": p.root,
                 "state": a.id(),
                 "why": null,
                 "advice": a.advice(cfg, p),
@@ -904,7 +913,12 @@ fn print_houses(
                 State::Missing => ("-", "-".dimmed().to_string()),
                 _ => (s.word(), paint(s)),
             };
-            line.push_str(&format!("  {painted}{}", " ".repeat(10 - word.len())));
+            // Each column is as wide as its header, so a long name keeps its cells under it.
+            let w = house.chars().count().max(10);
+            line.push_str(&format!(
+                "  {painted}{}",
+                " ".repeat(w.saturating_sub(word.len()))
+            ));
             if let State::Broken(why) = s {
                 notes.push(format!("{name} {house}: {why}"));
             }
@@ -922,13 +936,17 @@ fn print_projects(cfg: &Config, p: &Projects, label_w: usize, notes: &mut Vec<St
     let cols: Vec<String> = p.house.iter().map(|h| house_label(h)).collect();
     for x in &p.list {
         let mut line = format!("{:label_w$}", projects::short(cfg, &x.root));
-        for c in &x.cells {
+        for (c, h) in x.cells.iter().zip(&cols) {
             let (word, painted) = match &c.state {
                 State::Linked => ("imported", "imported".green().to_string()),
                 State::Broken(_) => ("broken", "broken".yellow().to_string()),
                 _ => ("-", "-".dimmed().to_string()),
             };
-            line.push_str(&format!("  {painted}{}", " ".repeat(10 - word.len())));
+            let w = h.chars().count().max(10);
+            line.push_str(&format!(
+                "  {painted}{}",
+                " ".repeat(w.saturating_sub(word.len()))
+            ));
         }
         out!("{}", line.trim_end());
         for (c, h) in x.cells.iter().zip(&cols) {

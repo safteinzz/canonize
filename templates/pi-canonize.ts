@@ -1,7 +1,7 @@
 /**
  * canonize: loads the CANON.md in pi's own folder, then the project's, and the
- * house files their `@` lines name, into pi's context, the way Claude reads
- * them through CLAUDE.md.
+ * conventions their `@` lines name, into pi's context, the way Claude reads
+ * them through CLAUDE.local.md.
  * Written by `canon`; delete this file to stop it.
  */
 
@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-/** The house files `canon` wires into pi for every project. */
+/** The conventions `canon` wires into pi for every project. */
 const AGENT_CANON = "__AGENT_CANON__";
 
 function resolve(target: string, fromDir: string): string {
@@ -18,7 +18,7 @@ function resolve(target: string, fromDir: string): string {
 	return path.resolve(fromDir, target);
 }
 
-/** The house files one CANON.md names, each as a section. */
+/** The conventions one CANON.md names, each as a section. */
 function sections(canon: string, seen: Set<string>): string[] {
 	if (!fs.existsSync(canon)) return [];
 	const out: string[] = [];

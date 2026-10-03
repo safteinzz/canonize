@@ -231,6 +231,10 @@ impl ServerForm {
                 bearer: Some(Bearer::Env(v)),
                 ..
             }) => format!("blank keeps reading ${v}"),
+            Some(Spec::Http {
+                bearer: Some(Bearer::Kept(_)),
+                ..
+            }) => "none kept yet: type it, or blank to send none".into(),
             _ => "the API key, or blank for browser sign-in or none".into(),
         }
     }

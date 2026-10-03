@@ -115,13 +115,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Show which agent has which rules and skills, and what drifted
+    /// Show which agent has which rules, skills, conventions and MCP servers, and what drifted
     ///   -a NAME   only this agent
     ///   --strict  exit 1 when something needs a person too (foreign, own, waiting on Claude)
     ///   --json    print it for a script instead of a person
     #[command(verbatim_doc_comment)]
     Status(cli::AgentArgs),
-    /// Fix what is broken or missing: link it, or repoint an import; foreign files stay
+    /// Fix what is broken or missing: link, repoint, rewrite what differs; foreign files stay
     ///   -a NAME   only this agent
     ///   -n        dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]

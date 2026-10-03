@@ -33,3 +33,4 @@ toml_edit  = "0.22"                                     # codex's config.toml, e
 serde_yaml = "0.9"                                      # the rules file
 serde_json = { version = "1", features = ["preserve_order"] }  # the rules schema; agents' JSON configs keep their key order
 jsonschema = { version = "0.33", default-features = false }  # validating the rules file, no network resolver
+signal-hook = "0.3"                                     # Ctrl-C while the editor has the terminal is the editor's

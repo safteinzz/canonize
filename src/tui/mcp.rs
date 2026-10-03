@@ -293,7 +293,14 @@ impl App {
                 };
                 Confirm::offer(
                     &verb.to_lowercase(),
-                    format!("{verb} {name} in {project}, for every agent?"),
+                    format!(
+                        "{verb} {name} in {project}, for every agent{}?",
+                        if m.shared.get(i) == Some(&true) {
+                            " but Claude, which keeps one list for the whole repo"
+                        } else {
+                            ""
+                        }
+                    ),
                     Action::Changes(vec![change]),
                 )
             } else {

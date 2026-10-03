@@ -541,7 +541,10 @@ impl App {
                         .map(|p| p.fixes())
                         .unwrap_or_default(),
                 );
-                (c, "every broken convention import and CANON.md wiring")
+                (
+                    plan::dedup(c.into_iter()),
+                    "every broken convention import and CANON.md wiring",
+                )
             }
             View::Mcp => (
                 self.mcps
@@ -1272,16 +1275,34 @@ fn run_suspended(
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
+    // A Ctrl-C meant for the editor reaches canonize too, and would end it.
+    let caught = swallow_interrupts();
     // `$EDITOR` may carry its own flags (`code -w`), so it is split on spaces.
     let mut parts = editor.split_whitespace();
     let status = parts
         .next()
         .and_then(|bin| Command::new(bin).args(parts).arg(path).status().ok());
+    for id in caught {
+        signal_hook::low_level::unregister(id);
+    }
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
     terminal.hide_cursor()?;
     terminal.clear()?;
     Ok(status)
+}
+
+/// Catch Ctrl-C and Ctrl-\ and do nothing with them, while a child that owns
+/// the terminal acts on them. A caught signal is reset to the default in an
+/// exec'd child, so this never reaches it, unlike `SIG_IGN`, which it would
+/// inherit. Hand the ids to `signal_hook::low_level::unregister` to stop.
+fn swallow_interrupts() -> Vec<signal_hook::SigId> {
+    use signal_hook::consts::{SIGINT, SIGQUIT};
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    [SIGINT, SIGQUIT]
+        .into_iter()
+        .filter_map(|signal| signal_hook::flag::register(signal, seen.clone()).ok())
+        .collect()
 }
 
 fn setup() -> Result<Term> {
