@@ -653,7 +653,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The help, as one body for the reader box that `?` opens.
-pub(super) const HELP: &str = "canonize: one source of truth for your coding agents\n\n\nAgents   j/k agent · ↵ open its card · esc back to the list\n         in the card: f fix the line · d delete it\n         F fix every agent's setup\nSkills   j/k skill · h/l agent · ↵ toggle (link, unlink, or adopt an own one)\n         a link… · d delete… (this cell, row or column; an own skill itself)\n         F link every missing skill\nConventions\n         j/k agent or project · h/l convention · ↵ toggle an import\n         an agent's row: it reads the file in every project\n         a add… · d delete… (this cell, row or column)\n         F fix broken imports and CANON.md wiring\n         o open the file the import sits in\nMCPs     j/k agent or project · h/l server · ↵ toggle a server\n         n a new server, written into your canon's mcp.toml\n         e edit the server, or give it a new token\n         an agent's row: its own config, for every project\n         a add to… · d delete from… (this cell, row or column)\n         F rewrite what differs from your canon\n         D delete the server from your canon, and its token\nAnywhere tab switch · v validate your canon · E edit canonize.toml\n         r reload · ? help · q quit\n\nlinked   wired to your canon\nimported a convention is read there\nadded    an MCP server is in that agent's config\nunwired  f wires it\nbroken   wired to the wrong thing; f repoints it\nforeign  something of yours or the agent's; left alone\nn/a      the agent has no way to use it\noff      turned off\n-        not installed (agents tab); not there (conventions, MCPs)\nown      a skill the agent keeps itself; f adopts it into your canon\n";
+pub(super) const HELP: &str = "canonize: one source of truth for your coding agents\n\n\nAgents   j/k agent · ↵ open its card · esc back to the list\n         in the card: f fix the line · d delete it\n         F fix every agent's setup\nSkills   j/k skill · h/l agent · ↵ toggle (link, unlink, or adopt an own one)\n         a link… · d delete… (this cell, row or column; an own skill itself)\n         F link every missing skill\nConventions\n         j/k agent or project · h/l convention · ↵ toggle an import\n         an agent's row: it reads the file in every project\n         a add… · d delete… (this cell, row or column)\n         F fix broken imports and CANON.md wiring\n         o open the file the import sits in\nMCPs     j/k agent or project · h/l server · ↵ toggle a server\n         n a new server, written into your canon's mcp.toml\n         e edit the server, or give it a new token\n         an agent's row: its own config, for every project\n         a add to… · d delete from… (this cell, row or column)\n         F rewrite what differs from your canon\n         D delete the server from your canon, and its token\nAnywhere tab switch · v validate your canon · E edit canonize.toml\n         r reload · ? help · q quit\n\nlinked   wired to your canon\nimported a convention is read there\nunapproved  imported, but Claude may not load it there yet\nadded    an MCP server is in that agent's config\nunwired  f wires it\nbroken   wired to the wrong thing; f repoints it\nforeign  something of yours or the agent's; left alone\nn/a      the agent has no way to use it\noff      turned off\n-        not installed (agents tab); not there (conventions, MCPs)\nown      a skill the agent keeps itself; f adopts it into your canon\n";
 
 /// A house cell's word: `imported` for one that is wired, `-` for one that
 /// is not, since neither needs fixing.
@@ -685,16 +685,25 @@ fn render_houses(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let cols = h.house.iter().map(|x| crate::cli::house_label(x)).collect();
-    let states = |row: HouseRow| -> Vec<&State> {
+    let states = |row: HouseRow| -> Vec<(&'static str, Style)> {
         match row {
-            HouseRow::Agent(a) => h.cells.iter().map(|r| &r[a].state).collect(),
-            HouseRow::Project(i) => p.list[i].cells.iter().map(|c| &c.state).collect(),
+            HouseRow::Agent(a) => h
+                .cells
+                .iter()
+                .map(|r| look(house_word, &r[a].state))
+                .collect(),
+            HouseRow::Project(i) => {
+                let x = &p.list[i];
+                x.cells
+                    .iter()
+                    .map(|c| project_look(&c.state, x.unread()))
+                    .collect()
+            }
         }
     };
     let grid = Places {
         block,
         cols,
-        word: house_word,
         at: (app.prow, app.pcol),
         top: &app.ptop,
     };
@@ -735,46 +744,63 @@ fn render_mcp(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let cols = m.servers.iter().map(|s| s.name.clone()).collect();
-    let states = |row: HouseRow| -> Vec<&State> {
+    let word = crate::cli::mcp_word;
+    let states = |row: HouseRow| -> Vec<(&'static str, Style)> {
         match row {
-            HouseRow::Agent(a) => m.cells.iter().map(|r| &r[a].state).collect(),
-            HouseRow::Project(i) => m.projects[i].iter().map(|c| &c.state).collect(),
+            HouseRow::Agent(a) => m.cells.iter().map(|r| look(word, &r[a].state)).collect(),
+            HouseRow::Project(i) => m.projects[i].iter().map(|c| look(word, &c.state)).collect(),
         }
     };
     let grid = Places {
         block,
         cols,
-        word: crate::cli::mcp_word,
         at: (app.mrow, app.mcol),
         top: &app.mtop,
     };
     render_places(f, area, app, grid, states);
 }
 
-/// What a grid of places shows: its frame, a column per `cols`, each cell as
-/// `word` of its state, with `at` (row, column) selected and `top` the first
-/// row on screen.
+/// A grid cell's word and style for `state`, a missing one dimmed.
+fn look(word: fn(&State) -> &'static str, state: &State) -> (&'static str, Style) {
+    let style = if *state == State::Missing {
+        Style::default().add_modifier(Modifier::DIM)
+    } else {
+        state_style(state)
+    };
+    (word(state), style)
+}
+
+/// A project's convention cell, which says why the agents cannot read an
+/// import yet in place of `imported`.
+fn project_look(state: &State, unread: Option<projects::Unread>) -> (&'static str, Style) {
+    match (state, unread) {
+        (State::Linked, Some(projects::Unread::Wiring(s))) => (s.word(), state_style(s)),
+        (State::Linked, Some(u)) => (u.word(), Style::default().fg(Color::Yellow)),
+        _ => look(house_word, state),
+    }
+}
+
+/// What a grid of places shows: its frame, a column per `cols`, with `at`
+/// (row, column) selected and `top` the first row on screen.
 struct Places<'t> {
     block: Block<'static>,
     cols: Vec<String>,
-    word: fn(&State) -> &'static str,
     at: (usize, usize),
     top: &'t Kept<usize>,
 }
 
 /// A grid of places something can go: a row per agent (for every project)
 /// above a row per project, with `states` giving a row's cells.
-fn render_places<'a>(
+fn render_places(
     f: &mut Frame,
     area: Rect,
-    app: &'a App,
+    app: &App,
     grid: Places,
-    states: impl Fn(HouseRow) -> Vec<&'a State>,
+    states: impl Fn(HouseRow) -> Vec<(&'static str, Style)>,
 ) {
     let Places {
         block,
         cols,
-        word,
         at,
         top,
     } = grid;
@@ -826,16 +852,11 @@ fn render_places<'a>(
             selected = rows.len();
         }
         let mut cells = vec![Cell::from(name.clone()).style(label)];
-        for (c, state) in states(row).into_iter().enumerate() {
-            let mut style = if *state == State::Missing {
-                dim
-            } else {
-                state_style(state)
-            };
+        for (c, (word, mut style)) in states(row).into_iter().enumerate() {
             if r == at.0 && c == at.1 {
                 style = style.add_modifier(Modifier::REVERSED);
             }
-            cells.push(Cell::from(format!(" {} ", word(state))).style(style));
+            cells.push(Cell::from(format!(" {word} ")).style(style));
         }
         rows.push(Row::new(cells));
     }
@@ -918,9 +939,12 @@ fn project_detail(app: &App, prow: usize, pcol: usize) -> Option<Pane> {
     let cell = &x.cells[pcol];
     let mut lines = vec![field(
         "state",
-        match &cell.state {
-            State::Linked => "imported".into(),
-            State::Broken(why) => format!("broken: {why}"),
+        match (&cell.state, x.unread()) {
+            (State::Linked, Some(u)) => {
+                format!("{}: in CANON.md, not read here yet", u.word())
+            }
+            (State::Linked, None) => "imported".into(),
+            (State::Broken(why), _) => format!("broken: {why}"),
             _ => "not imported".into(),
         },
     )];

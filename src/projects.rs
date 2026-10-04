@@ -81,6 +81,20 @@ impl Approval {
     }
 }
 
+pub enum Unread<'a> {
+    Wiring(&'a State),
+    Unapproved,
+}
+
+impl Unread<'_> {
+    pub fn word(&self) -> &'static str {
+        match self {
+            Unread::Wiring(s) => s.word(),
+            Unread::Unapproved => "unapproved",
+        }
+    }
+}
+
 pub struct Wire {
     pub what: String,
     pub state: State,
@@ -165,6 +179,22 @@ impl Project {
         self.cells
             .iter()
             .any(|c| matches!(c.state, State::Linked | State::Broken(_)))
+    }
+
+    /// What an imported cell shows in place of `imported` while the agents
+    /// cannot read CANON.md here yet: the first wiring not in place, else
+    /// Claude not allowed to load it; `None` once they read it.
+    pub fn unread(&self) -> Option<Unread<'_>> {
+        if let Some(w) = self
+            .wiring
+            .iter()
+            .find(|w| !matches!(w.state, State::Linked | State::Na))
+        {
+            return Some(Unread::Wiring(&w.state));
+        }
+        self.claude
+            .filter(|a| *a != Approval::Approved)
+            .map(|_| Unread::Unapproved)
     }
 
     /// The broken cells `fix` repairs. While Claude cannot be pointed at
@@ -929,6 +959,34 @@ mod tests {
             ignore.trim().is_empty(),
             "every line canonize added goes back: {ignore}"
         );
+    }
+
+    #[test]
+    fn an_import_no_agent_can_reach_is_not_imported() {
+        let (t, cfg, house) = world();
+        let root = t.write("dev/app/AGENTS.md", "# app\n");
+        let root = root.parent().expect("a project folder").to_path_buf();
+        t.write("dev/app/CANON.md", &format!("@{}\n", house.display()));
+        let unread = || only(&cfg).unread().map(|u| u.word());
+        fs::write(&cfg.claude_state, "{\"projects\": {}}").expect("could not write the state");
+
+        assert_eq!(
+            unread(),
+            Some("unwired"),
+            "no CLAUDE.local.md points Claude at CANON.md"
+        );
+        apply(only(&cfg).wiring_changes());
+        assert_eq!(
+            unread(),
+            Some("unapproved"),
+            "wired, but Claude has not allowed external imports"
+        );
+        let state = serde_json::json!({ "projects": { root.to_str().expect("a UTF-8 temp path"): {
+            "hasClaudeMdExternalIncludesApproved": true,
+            "hasClaudeMdExternalIncludesWarningShown": true,
+        }}});
+        fs::write(&cfg.claude_state, state.to_string()).expect("could not write the state");
+        assert_eq!(unread(), None, "wired and allowed is imported");
     }
 
     #[test]

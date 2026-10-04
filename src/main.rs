@@ -56,6 +56,7 @@ const AFTER: &str = concat!(
   own      only that agent has it, `adopt` takes it into your canon
   foreign  yours or the agent's, left alone        n/a, off  cannot, turned off
   -        not installed (agents table); elsewhere not there (`none`), no drift
+  unapproved  a project imports it, but Claude is not allowed to load it there
 
 \x1b[1mConventions:\x1b[0m
   Files an agent reads for one kind of work: an agent's row reads one everywhere,

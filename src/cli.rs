@@ -936,10 +936,13 @@ fn print_projects(cfg: &Config, p: &Projects, label_w: usize, notes: &mut Vec<St
     let cols: Vec<String> = p.house.iter().map(|h| house_label(h)).collect();
     for x in &p.list {
         let mut line = format!("{:label_w$}", projects::short(cfg, &x.root));
+        let unread = x.unread();
         for (c, h) in x.cells.iter().zip(&cols) {
-            let (word, painted) = match &c.state {
-                State::Linked => ("imported", "imported".green().to_string()),
-                State::Broken(_) => ("broken", "broken".yellow().to_string()),
+            let (word, painted) = match (&c.state, &unread) {
+                (State::Linked, Some(projects::Unread::Wiring(s))) => (s.word(), paint(s)),
+                (State::Linked, Some(u)) => (u.word(), u.word().yellow().to_string()),
+                (State::Linked, None) => ("imported", "imported".green().to_string()),
+                (State::Broken(_), _) => ("broken", "broken".yellow().to_string()),
                 _ => ("-", "-".dimmed().to_string()),
             };
             let w = h.chars().count().max(10);
