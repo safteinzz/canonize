@@ -1,7 +1,7 @@
 # The skills tab: a skill Claude kept itself adopted with Enter, every skill
 # linked to Claude with a…, then every missing link made with F.
 #
-#   cd demo && vhs skills.tape
+#   ./render.sh skills
 
 Output ../readme-assets/skills.gif
 

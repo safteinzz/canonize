@@ -45,6 +45,30 @@ pub struct ChangeArgs {
 }
 
 #[derive(clap::Args)]
+pub struct PlaceArgs {
+    /// The convention, as `canon status` names it (`rust`) or by its file name
+    pub convention: String,
+    /// A project, as `canon status` names it or by its path (`.` for this one)
+    #[arg(value_name = "PROJECT")]
+    pub projects: Vec<String>,
+    /// An agent, which reads a convention in every project; once per agent
+    #[arg(short, long = "agent", value_name = "NAME")]
+    pub agents: Vec<String>,
+    /// Every project, or every agent (one that cannot read another file is skipped)
+    #[arg(long, value_enum, value_name = "WHERE")]
+    pub every: Vec<Every>,
+    /// Dry run: print what would change and change nothing
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Every {
+    Project,
+    Agent,
+}
+
+#[derive(clap::Args)]
 pub struct SetupArgs {
     /// Dry run: print what it found and change nothing
     #[arg(short = 'n', long)]
@@ -1040,6 +1064,152 @@ pub fn delete(args: ChangeArgs) -> Result<i32> {
         }
     }
     Ok(run_changes(changes, args.dry_run, "nothing to delete"))
+}
+
+/// `canon add` and, with `remove`, `canon remove`: one convention in the
+/// projects and agents named. A target that already has it, or has nothing to
+/// take back, is said and skipped; an agent named that cannot read it is an
+/// error before anything changes. Bulk targets skip both without a word.
+pub fn place(args: PlaceArgs, remove: bool) -> Result<i32> {
+    let cfg = config::load()?;
+    let projects = Projects::build(&cfg);
+    let houses = Houses::build(&cfg);
+    let col = convention(&houses.house, &args.convention)?;
+    let label = house_label(&houses.house[col]);
+    let every = |e| args.every.contains(&e);
+
+    let mut picked: Vec<(usize, bool)> = Vec::new();
+    for arg in &args.projects {
+        picked.push((project_index(&cfg, &projects, arg)?, true));
+    }
+    if every(Every::Project) {
+        picked.extend((0..projects.list.len()).map(|i| (i, false)));
+    }
+    let mut agents: Vec<(usize, bool)> = Vec::new();
+    for name in &args.agents {
+        agents.push((pick(&cfg, &Some(name.clone()))?.unwrap_or(0), true));
+    }
+    if every(Every::Agent) {
+        agents.extend((0..cfg.agents.len()).map(|a| (a, false)));
+    }
+    if picked.is_empty() && agents.is_empty() {
+        bail!("say where: a project, `-a AGENT`, or `--every project|agent`");
+    }
+
+    let mut notes = Vec::new();
+    let mut changes = Vec::new();
+    for &(a, named) in &agents {
+        let cell = &houses.cells[col][a];
+        let agent = &cfg.agents[a].name;
+        if remove {
+            match &cell.undo {
+                Some(u) => changes.push(u.clone()),
+                None if named => notes.push(format!("{agent} does not read {label}")),
+                None => {}
+            }
+            continue;
+        }
+        match (&cell.change, &cell.state) {
+            (Some(c), _) => changes.push(c.clone()),
+            (None, _) if !named => {}
+            (None, State::Linked) => notes.push(format!("{agent} already reads {label}")),
+            (None, State::Absent) => {
+                bail!("`{agent}` is not installed or is turned off, so it reads no convention")
+            }
+            (None, s) => match s.why() {
+                Some(why) => bail!("`{agent}` cannot read {label}: {why}"),
+                None => bail!(
+                    "`{agent}` has no way to read another file: add {label} to each project instead"
+                ),
+            },
+        }
+    }
+    for &(i, named) in &picked {
+        let p = &projects.list[i];
+        let cell = &p.cells[col];
+        let name = projects::short(&cfg, &p.root);
+        if remove {
+            match &cell.undo {
+                Some(u) => changes.push(u.clone()),
+                None if named => notes.push(format!("{name} does not import {label}")),
+                None => {}
+            }
+            continue;
+        }
+        match &cell.change {
+            Some(c) => {
+                changes.push(c.clone());
+                changes.extend(p.wiring_changes());
+            }
+            None if named => notes.push(format!("{name} already imports {label}")),
+            None => {}
+        }
+    }
+
+    for n in &notes {
+        out!("{}", n.dimmed());
+    }
+    let nothing = if !notes.is_empty() {
+        ""
+    } else if remove {
+        "nothing to remove"
+    } else {
+        "nothing to add"
+    };
+    let code = run_changes(plan::dedup(changes.into_iter()), args.dry_run, nothing);
+    if code == 0 && !remove && !args.dry_run && !picked.is_empty() {
+        let after = Projects::build(&cfg);
+        for &(i, _) in &picked {
+            let Some(p) = after.list.get(i) else { continue };
+            if let Some(advice) = p.claude.and_then(|a| a.advice(&cfg, p)) {
+                out!(
+                    "{}",
+                    format!("{}: {advice}", projects::short(&cfg, &p.root)).dimmed()
+                );
+            }
+        }
+    }
+    Ok(code)
+}
+
+/// The convention `arg` names, by its label or its file name.
+fn convention(house: &[PathBuf], arg: &str) -> Result<usize> {
+    let want = house_label(std::path::Path::new(arg));
+    if let Some(i) = house.iter().position(|h| house_label(h) == want) {
+        return Ok(i);
+    }
+    if house.is_empty() {
+        bail!("no convention `{arg}`: your canon has none");
+    }
+    let known: Vec<String> = house.iter().map(|h| house_label(h)).collect();
+    bail!("no convention `{arg}`: try one of `{}`", known.join("`, `"))
+}
+
+/// The project `arg` names, as `canon status` prints it or by its path.
+fn project_index(cfg: &Config, p: &Projects, arg: &str) -> Result<usize> {
+    if let Some(i) = p
+        .list
+        .iter()
+        .position(|x| projects::short(cfg, &x.root) == arg)
+    {
+        return Ok(i);
+    }
+    if let Ok(real) = fs::canonicalize(config::expand(arg)) {
+        let same = |x: &projects::Project| fs::canonicalize(&x.root).is_ok_and(|r| r == real);
+        if let Some(i) = p.list.iter().position(same) {
+            return Ok(i);
+        }
+    }
+    if cfg.projects.is_empty() {
+        bail!(
+            "`{arg}` is not a project canonize knows: no project folder is set, `canon config set projects <DIR>...` sets one"
+        );
+    }
+    let dirs: Vec<String> = cfg.projects.iter().map(|d| tilde(d)).collect();
+    bail!(
+        "`{arg}` is not a project canonize knows: it looks in `{}` for a folder with a CLAUDE.md or AGENTS.md, and `canon status` lists what it found",
+        dirs.join("`, `")
+    )
 }
 
 pub fn validate(args: JsonArgs) -> Result<i32> {

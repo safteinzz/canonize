@@ -233,9 +233,10 @@ impl Wizard {
         let i = self.index();
         let typing = matches!(self.step, Step::Folder | Step::Skills | Step::Projects);
         match key.code {
-            Esc if i == 0 => return Outcome::Cancelled,
-            Esc => self.step = self.steps()[i - 1],
-            Enter => {
+            Esc => return Outcome::Cancelled,
+            BackTab => self.step = self.steps()[i.saturating_sub(1)],
+            // Tab steps like Enter but never submits from the last question.
+            Enter | Tab => {
                 if self.step == Step::Folder {
                     if self.folder.trim().is_empty() {
                         return Outcome::Pending;
@@ -247,7 +248,8 @@ impl Wizard {
                 }
                 match self.steps().get(i + 1) {
                     Some(next) => self.step = *next,
-                    None => return Outcome::Done(self.choice()),
+                    None if key.code == Enter => return Outcome::Done(self.choice()),
+                    None => {}
                 }
             }
             _ if typing => {
@@ -390,13 +392,11 @@ pub(super) fn render_wizard(f: &mut Frame, area: Rect, w: &Wizard) {
         lines.push(Line::styled(n.clone(), dim));
     }
     lines.push(Line::raw(""));
-    let hint = match w.step {
-        Step::Folder => "enter next · esc cancel · * required",
-        Step::Skills => "enter next · esc back · * required",
-        Step::Projects => "enter review · esc back",
-        _ => "j/k ↑↓ choose · enter next · esc back",
+    let keys = match w.step {
+        Step::Folder | Step::Skills => [FORM_KEYS, &[REQUIRED]].concat(),
+        _ => FORM_KEYS.to_vec(),
     };
-    lines.push(box_hint(hint));
+    lines.push(box_hint(&keys));
 
     let width = box_width(area.width);
     let inner = box_inner_width(width);

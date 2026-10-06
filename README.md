@@ -76,11 +76,15 @@ Enter works like in the conventions tab: it links a missing skill, unlinks a lin
 ![the projects tab: a broken import repointed with Enter, then one convention added to every project with a](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/projects.gif)
 
 ```bash
-canon            # tab to Conventions: a column per convention, a row per agent and per project
-canon status     # prints the same table under the agents one
+canon                             # tab to Conventions: a column per convention, a row per agent and per project
+canon status                      # prints the same table under the agents one
+canon add tui-vi .                # this project reads tui-vi
+canon remove tui-modeless .       # and no longer reads tui-modeless
+canon add rust -a claude          # Claude reads rust in every project
+canon add rust --every project -n # print what adding it everywhere would change
 ```
 
-A convention either fits a project (how your Rust crates ship) or fits an agent wherever it runs (that it is on WSL, how to reach your GitLab). The **Conventions** tab has both: the rows under `every project` are your agents, and one imported there is read by that agent in every project; the rows under `projects` are the projects canonize found. Enter works like a checkbox: it adds or repoints an import, or removes one that is there. `a` and `d` open a choice of how far to go: this cell, every convention in this row, or this convention in every agent or every project, each with how many changes it makes; `o` opens the file the import sits in. When your canon moves, every import of a convention that is gone shows as broken and `F` (or `canon fix`) repoints them all at once. `canon fix` never adds one: who reads which convention is only ever what you chose. A project's import says `imported` only once the agents read it: until then it says `unwired` while its CANON.md is not wired (`F` wires it), or `unapproved` while Claude has not been allowed to load it there.
+A convention either fits a project (how your Rust crates ship) or fits an agent wherever it runs (that it is on WSL, how to reach your GitLab). The **Conventions** tab has both: the rows under `every project` are your agents, and one imported there is read by that agent in every project; the rows under `projects` are the projects canonize found. Enter works like a checkbox: it adds or repoints an import, or removes one that is there. `a` and `d` open a choice of how far to go: this cell, every convention in this row, or this convention in every agent or every project, each with how many changes it makes; `o` opens the file the import sits in. When your canon moves, every import of a convention that is gone shows as broken and `F` (or `canon fix`) repoints them all at once. `canon fix` never adds one: who reads which convention is only ever what you chose, in the tab or with `canon add` and `canon remove`, which take a convention and a project as `canon status` names them (or its path), `-a` for an agent, or `--every project|agent`. A project's import says `imported` only once the agents read it: until then it says `unwired` while its CANON.md is not wired (`F` wires it), or `unapproved` while Claude has not been allowed to load it there.
 
 Tell canonize where your projects live (`projects = ["~/dev"]`, which setup asks for) and it finds every project with a `CLAUDE.md` or `AGENTS.md` up to three levels down. An import naming a file that exists nowhere is listed under the project.
 
@@ -115,7 +119,7 @@ canon            # tab to MCPs: a column per server, a row per agent and per pro
 canon status     # prints the same table under the conventions one
 ```
 
-Describe each server once, with `n` in the tab (`e` edits one, `D` deletes it from your canon with its token) or by hand in your canon's `mcp.toml`, and canonize writes it into every agent the way that agent wants it:
+Describe each server once, with `c` in the tab (`e` edits one, and the last choice `d` offers deletes it from your canon with its token) or by hand in your canon's `mcp.toml`, and canonize writes it into every agent the way that agent wants it:
 
 ```toml
 [esb]
@@ -186,16 +190,18 @@ canon init [DIR] [-n]                        # lay out a new source
 
 | key | does |
 | --- | --- |
-| `j` `k` `↑` `↓` | move |
-| `Tab` | next tab |
+| `j` `k` / `↑` `↓` | move in the list; `h` `l` / `←` `→` pick the column in a grid |
+| `tab` `shift-tab` | switch tab |
+| `/` | filter the rows; `↵` keeps it, `esc` drops it |
 | `F` | fix everything this tab shows |
 | `v` | validate your canon |
 | `E` | edit canonize.toml |
 | `r` | read everything from disk again |
-| `?` | help |
-| `q` `Esc` `Ctrl-c` | quit |
+| `esc` | cancel a form or a question, close help or an alert, leave an agent's card |
+| `?` | every key, on every tab |
+| `q` / `ctrl-c` | quit; in a form or a box, `ctrl-c` is `esc` |
 
-Each tab's own keys are on its bottom bar, and `?` lists them all.
+Each tab's own keys are on its bottom line, and `?` lists them all.
 
 ## Driving it from a script
 

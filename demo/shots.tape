@@ -1,7 +1,7 @@
 # The README's still of `canon status`, from a staged home that is set up but
 # not yet fixed. The tabs are GIFs, one tape each.
 #
-#   cd demo && vhs shots.tape
+#   ./render.sh shots
 
 # VHS always records a video; with every frame hidden there is nothing to
 # encode, so this one is a throwaway.

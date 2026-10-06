@@ -1,7 +1,7 @@
 # First run: a canon that just moved, found and set up in six answers, then
 # every agent's setup fixed with one F.
 #
-#   cd demo && vhs setup.tape
+#   ./render.sh setup
 
 Output ../readme-assets/setup.gif
 

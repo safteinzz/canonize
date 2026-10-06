@@ -95,11 +95,7 @@ pub(super) fn render_typed(f: &mut Frame, area: Rect, t: &Typed) {
             .collect::<Vec<_>>(),
     ));
     lines.push(Line::raw(""));
-    lines.push(box_hint(if ok {
-        "enter delete · esc cancel"
-    } else {
-        "type the name to unlock enter · esc cancel"
-    }));
+    lines.push(box_hint(TYPED_KEYS));
     let para = Paragraph::new(lines)
         .block(box_block(Color::Red, &t.title))
         .wrap(Wrap { trim: false });

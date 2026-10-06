@@ -1,7 +1,7 @@
 # The agents tab: the list, a card opened with Enter, one line fixed, the
 # skills line linking them all, and back to the list with Esc.
 #
-#   cd demo && vhs agents.tape
+#   ./render.sh agents
 
 Output ../readme-assets/agents.gif
 

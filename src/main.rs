@@ -62,13 +62,13 @@ const AFTER: &str = concat!(
   Files an agent reads for one kind of work: an agent's row reads one everywhere,
   a project imports it in its gitignored CANON.md, which Claude reads through
   CLAUDE.local.md once allowed there (`--json` `claude`: approved, not_asked,
-  declined). Codex reads no other file. Adding one is the TUI's Conventions tab.
+  declined). Codex reads no other file. `add` and `remove` change who reads one.
 
 \x1b[1mMCP servers:\x1b[0m
   A table each in your canon's mcp.toml: a `url` (`token = true` for one typed in
   the TUI and kept outside your canon; `--json` `token`: kept, missing) or a
-  `command`. The TUI's MCPs tab adds one to an agent or project (n new, e edit,
-  D delete); `fix` rewrites what differs, `delete` takes them back.
+  `command`. The TUI's MCPs tab adds one to an agent or project (c create,
+  e edit, d delete); `fix` rewrites what differs, `delete` takes them back.
 
 Your canon is `$CANONIZE_SOURCE`, else your config folder (~/.config/canonize,
 and ~/Library/Application Support/canonize on macOS), and holds canonize.toml.
@@ -132,6 +132,18 @@ enum Cmd {
     ///   -n        dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Delete(cli::ChangeArgs),
+    /// Make projects, or an agent in every project, read one convention  <CONVENTION> [PROJECT]...
+    ///   -a NAME                 an agent, which then reads it in every project
+    ///   --every project|agent   every project, or every agent that can read it
+    ///   -n                      dry run: print what would change and change nothing
+    #[command(verbatim_doc_comment)]
+    Add(cli::PlaceArgs),
+    /// Stop projects, or an agent, reading one convention  <CONVENTION> [PROJECT]...
+    ///   -a NAME                 an agent, which then reads it in no project
+    ///   --every project|agent   every project, or every agent
+    ///   -n                      dry run: print what would change and change nothing
+    #[command(verbatim_doc_comment)]
+    Remove(cli::PlaceArgs),
     /// Validate your canon: the rules file against its schema, every SKILL.md, mcp.toml
     ///   --json    print it for a script instead of a person
     #[command(verbatim_doc_comment)]
@@ -179,6 +191,8 @@ fn main() {
         Some(Cmd::Status(a)) => cli::status(a),
         Some(Cmd::Fix(a)) => cli::fix(a),
         Some(Cmd::Delete(a)) => cli::delete(a),
+        Some(Cmd::Add(a)) => cli::place(a, false),
+        Some(Cmd::Remove(a)) => cli::place(a, true),
         Some(Cmd::Validate(a)) => cli::validate(a),
         Some(Cmd::Setup(a)) => cli::setup(a),
         Some(Cmd::Adopt(a)) => cli::adopt(a),

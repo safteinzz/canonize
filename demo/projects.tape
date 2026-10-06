@@ -1,7 +1,7 @@
 # The projects tab: a broken import repointed with Enter, one house file
 # added to every project with a…, and the remove choices with d.
 #
-#   cd demo && vhs projects.tape
+#   ./render.sh projects
 
 Output ../readme-assets/projects.gif
 

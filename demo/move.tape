@@ -2,7 +2,7 @@
 # named it repointed. Wider than the other stills, because the lines name both
 # the old path and the new one.
 #
-#   cd demo && vhs move.tape
+#   ./render.sh move
 
 # VHS always records a video; with every frame hidden there is nothing to
 # encode, so this one is a throwaway.

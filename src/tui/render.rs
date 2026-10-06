@@ -5,32 +5,40 @@ use ratatui::prelude::*;
 use std::cell::Cell as Kept;
 
 use ratatui::widgets::{
-    Block, Borders, Cell, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table,
-    TableState, Tabs, Wrap,
+    Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs, Wrap,
 };
 
 use super::alert::render_note;
 use super::confirm::render_confirm;
+use super::line_edit;
 use super::scope::render_scope;
 use super::server_form::render_server_form;
 use super::typed::render_typed;
-use super::widgets::wrapped_line_count;
+use super::widgets::*;
 use super::wizard::render_wizard;
 use super::{App, HouseRow, View};
 use crate::config::{RulesMode, SkillsMode, tilde};
 use crate::plan::{self, State};
 use crate::projects;
 
-const HINTS: &str = "j/k agent · ↵ open its card · F fix every agent · ? help";
-const CARD_HINTS: &str = "j/k line · ↵ f fix · d delete · esc back to the list · ? help";
-const SKILL_HINTS: &str = "↵ toggle · a link… · d delete… · F link all · ? help";
-/// `{open}` is ` · o open <file>` for the row's file, or nothing when it has none.
-const HOUSE_HINTS: &str = "↵ toggle · a add… · d delete… · F fix broken{open} · ? help";
-const MCP_HINTS: &str = "↵ toggle · n new · e edit · D delete server · a add to… · d delete from… · F fix{open} · ? help";
+const ADD: &str = "a add";
+const OPEN: &str = "o open";
+const FIX_ALL: &str = "F fix all";
+const ON_OFF: &str = "↵ on/off";
+const AGENT_KEYS: &[&str] = &["↵ open", FIX_ALL, FIND, REFRESH, QUIT];
+const CARD_KEYS: &[&str] = &["↵ fix", FIX_ALL, DEL, BACK, REFRESH, QUIT];
+const SKILL_KEYS: &[&str] = &[ON_OFF, ADD, FIX_ALL, DEL, FIND, REFRESH, QUIT];
+const UNSET_KEYS: &[&str] = &["s set up", QUIT];
 
 pub(super) fn ui(f: &mut Frame, app: &App) {
-    let area = f.area();
-    let pane = detail_pane(app, area.width);
+    let screen = f.area();
+    // Every box is drawn over the rows above the footer, so its key row and
+    // bottom border never land on the footer's row.
+    let area = Rect {
+        height: screen.height.saturating_sub(1),
+        ..screen
+    };
+    let pane = detail_pane(app, screen.width);
     let chunks = Layout::vertical([
         Constraint::Length(3),
         // Three rows of a grid under its header, taken from the detail pane
@@ -39,7 +47,7 @@ pub(super) fn ui(f: &mut Frame, app: &App) {
         Constraint::Length(pane.as_ref().map_or(0, |(_, h)| *h)),
         Constraint::Length(1),
     ])
-    .split(area);
+    .split(screen);
     if let Some((p, _)) = pane {
         p.render(f, chunks[2]);
     }
@@ -86,6 +94,9 @@ pub(super) fn ui(f: &mut Frame, app: &App) {
     if let Some(t) = &app.typed {
         render_typed(f, area, t);
     }
+    if app.show_help {
+        render_help(f, area, app);
+    }
     // Last, so a failure is never drawn under the thing that caused it.
     if let Some(n) = &app.note {
         render_note(f, area, n);
@@ -107,13 +118,10 @@ fn render_source(f: &mut Frame, area: Rect, app: &App) {
         } else {
             let n = r.problems.len();
             spans.push(Span::styled(
-                format!("{n} problem{} (v)", if n == 1 { "" } else { "s" }),
+                format!("{n} problem{}", if n == 1 { "" } else { "s" }),
                 Style::default().fg(Color::Yellow),
             ));
         }
-    }
-    if app.cfg.is_some() {
-        spans.push(Span::styled("  ·  E edit config", dim));
     }
     // The tabs on the left, where the canon is on the right, in one frame.
     let block = Block::default()
@@ -121,12 +129,7 @@ fn render_source(f: &mut Frame, area: Rect, app: &App) {
         .title(" canonize · canon ");
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let cols = Layout::horizontal([
-        Constraint::Length(42),
-        Constraint::Length(9),
-        Constraint::Min(0),
-    ])
-    .split(inner);
+    let cols = Layout::horizontal([Constraint::Length(42), Constraint::Min(0)]).split(inner);
     let idx = match app.view {
         View::Agents => 0,
         View::Skills => 1,
@@ -143,12 +146,8 @@ fn render_source(f: &mut Frame, area: Rect, app: &App) {
         );
     f.render_widget(tabs, cols[0]);
     f.render_widget(
-        Paragraph::new("tab ⇄").style(Style::default().add_modifier(Modifier::DIM)),
-        cols[1],
-    );
-    f.render_widget(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
-        cols[2],
+        cols[1],
     );
 }
 
@@ -183,10 +182,10 @@ fn render_agents(f: &mut Frame, area: Rect, app: &App) {
     let dim = Style::default().add_modifier(Modifier::DIM);
     let cols = Layout::horizontal([Constraint::Length(26), Constraint::Min(0)]).split(area);
 
-    let items: Vec<Line> = cfg
-        .agents
+    let shown = app.agent_rows();
+    let items: Vec<Line> = shown
         .iter()
-        .enumerate()
+        .map(|&i| (i, &cfg.agents[i]))
         .map(|(i, a)| {
             let drifted = plan.cells.iter().any(|r| r[i].state.drifted());
             let (dot, colour) = if !a.active() {
@@ -223,7 +222,7 @@ fn render_agents(f: &mut Frame, area: Rect, app: &App) {
         cols[0],
     );
 
-    let Some(agent) = cfg.agents.get(app.col) else {
+    let Some(agent) = cfg.agents.get(app.col).filter(|_| shown.contains(&app.col)) else {
         return;
     };
     let lines: Vec<Line> = app
@@ -316,10 +315,10 @@ fn render_skills(f: &mut Frame, area: Rect, app: &App) {
     };
     let dim = Style::default().add_modifier(Modifier::DIM);
     let block = Block::default().borders(Borders::ALL).title(" skills ");
-    let rows_idx = plan.skill_rows();
-    if rows_idx.is_empty() {
+    let rows_idx = app.skill_list();
+    if plan.skill_rows().is_empty() {
         let para = Paragraph::new(
-            "No skills yet: put a folder with a SKILL.md in your canon's skills/, and a skill an agent keeps itself shows here as own, for f to adopt.",
+            "No skills yet: put a folder with a SKILL.md in your canon's skills/, and a skill an agent keeps itself shows here as own, for ↵ to adopt.",
         )
         .style(dim)
         .block(block)
@@ -327,7 +326,8 @@ fn render_skills(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(para, area);
         return;
     }
-    let label_w = rows_idx
+    let label_w = plan
+        .skill_rows()
         .iter()
         .map(|r| plan.rows[*r].label().chars().count())
         .max()
@@ -391,21 +391,13 @@ fn render_grid(
     f.render_stateful_widget(table, area, &mut state);
     top.set(state.offset());
     let viewport = area.height.saturating_sub(2 + header_h) as usize;
-    if total <= viewport {
-        return;
-    }
-    let mut bar = ScrollbarState::new(total - viewport).position(state.offset());
-    f.render_stateful_widget(
-        Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(None)
-            .end_symbol(None),
-        Rect {
-            y: area.y + 1 + header_h,
-            height: viewport as u16,
-            ..area
-        },
-        &mut bar,
-    );
+    // Measured from below the header, so the bar runs beside the rows alone.
+    let rows = Rect {
+        y: area.y + header_h,
+        height: area.height.saturating_sub(header_h),
+        ..area
+    };
+    vscrollbar(f, rows, total, state.offset(), viewport);
 }
 
 /// A detail pane's title and body, built before the frame is laid out so the
@@ -448,24 +440,28 @@ fn detail_pane(app: &App, width: u16) -> Option<(Pane, u16)> {
     let tallest = |panes: Vec<Pane>| panes.iter().map(|p| p.height(width)).max().unwrap_or(0);
     if app.view == View::Houses {
         let cols = app.houses.as_ref()?.house.len();
-        let pane = |r: usize, c: usize| match app.house_row_at(r)? {
+        let pane = |r: HouseRow, c: usize| match r {
             HouseRow::Agent(a) => house_detail(app, a, c),
             HouseRow::Project(i) => project_detail(app, i, c),
         };
-        let all = (0..app.house_rows())
+        let all = app
+            .all_places()
+            .into_iter()
             .flat_map(|r| (0..cols).map(move |c| (r, c)))
             .filter_map(|(r, c)| pane(r, c))
             .collect();
-        return Some((pane(app.prow, app.pcol)?, tallest(all)));
+        return Some((pane(app.house_row()?, app.pcol)?, tallest(all)));
     }
     if app.view == View::Mcp {
         let cols = app.mcps.as_ref()?.servers.len();
-        let pane = |r: usize, c: usize| mcp_detail(app, app.house_row_at(r)?, c);
-        let all = (0..app.house_rows())
+        let all = app
+            .all_places()
+            .into_iter()
             .flat_map(|r| (0..cols).map(move |c| (r, c)))
-            .filter_map(|(r, c)| pane(r, c))
+            .filter_map(|(r, c)| mcp_detail(app, r, c))
             .collect();
-        return Some((pane(app.mrow, app.mcol)?, tallest(all)));
+        let at = app.house_row_at(app.mrow)?;
+        return Some((mcp_detail(app, at, app.mcol)?, tallest(all)));
     }
     let (cfg, plan) = (app.cfg.as_ref()?, app.plan.as_ref()?);
     let rows: Vec<Option<usize>> = if app.view == View::Skills {
@@ -481,6 +477,14 @@ fn detail_pane(app: &App, width: u16) -> Option<(Pane, u16)> {
         .flat_map(|c| rows.iter().map(move |r| (*r, c)))
         .filter_map(|(r, c)| detail(app, r, c))
         .collect();
+    // A filter that hides every row leaves nothing selected to explain.
+    let hidden = match app.view {
+        View::Skills => app.skill_list().is_empty(),
+        _ => !app.agent_rows().contains(&app.col),
+    };
+    if hidden {
+        return None;
+    }
     Some((detail(app, app.selected_row(), app.col)?, tallest(all)))
 }
 
@@ -592,68 +596,295 @@ fn detail(app: &App, row: Option<usize>, col: usize) -> Option<Pane> {
 }
 
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
-    let (text, style) = match app.live_status() {
-        Some(msg) => (
-            msg.to_string(),
-            Style::default().fg(if app.status_failed {
-                Color::Yellow
-            } else {
-                Color::Green
-            }),
-        ),
-        None => (
-            if app.load_error.is_some() {
-                "s set up · ? help · q quit".to_string()
-            } else if app.view == View::Houses {
-                let file = match app.house_row() {
-                    Some(HouseRow::Project(i)) => app
-                        .projects
-                        .as_ref()
-                        .and_then(|p| p.list.get(i))
-                        .map(|x| x.host.clone()),
-                    Some(HouseRow::Agent(a)) => app
-                        .houses
-                        .as_ref()
-                        .and_then(|h| h.cells.get(app.pcol)?.get(a))
-                        .map(|c| c.at.clone())
-                        .filter(|at| at.is_file()),
-                    None => None,
-                };
-                let open = file
-                    .and_then(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
-                    .map_or(String::new(), |n| format!(" · o open {n}"));
-                HOUSE_HINTS.replace("{open}", &open)
-            } else if app.view == View::Mcp {
-                let file = match app.house_row_at(app.mrow) {
-                    Some(HouseRow::Agent(a)) => app
-                        .mcps
-                        .as_ref()
-                        .and_then(|m| m.cells.get(app.mcol)?.get(a))
-                        .map(|c| c.at.clone())
-                        .filter(|at| {
-                            at.is_file() && app.cfg.as_ref().is_some_and(|c| *at != c.claude_state)
-                        }),
-                    _ => None,
-                };
-                let open = file
-                    .and_then(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()))
-                    .map_or(String::new(), |n| format!(" · o open {n}"));
-                MCP_HINTS.replace("{open}", &open)
-            } else if app.view == View::Skills {
-                SKILL_HINTS.to_string()
-            } else if app.in_card {
-                CARD_HINTS.to_string()
-            } else {
-                HINTS.to_string()
-            },
-            Style::default().add_modifier(Modifier::DIM),
-        ),
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    // While `/` is being typed the row belongs to the query, the only place
+    // what was typed shows.
+    if app.searching {
+        let mut spans = vec![Span::styled(
+            " /",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )];
+        spans.extend(line_edit::with_cursor(
+            &app.query,
+            app.query_back,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        // Every letter goes into the query here, so only keys that are not
+        // letters are offered.
+        spans.push(Span::styled(
+            format!("   {} match   ↵ keep{SEP}{BACK}", app.row_count()),
+            dim,
+        ));
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
+    if let Some(msg) = app.live_status() {
+        let colour = if app.status_failed {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        f.render_widget(
+            Paragraph::new(format!(" {msg}")).style(Style::default().fg(colour)),
+            area,
+        );
+        return;
+    }
+    // `o open` only where the row has a file to open.
+    let with_open = |file: Option<std::path::PathBuf>, extra: &[&'static str]| {
+        let mut keys = vec![ON_OFF, ADD];
+        if file.is_some() {
+            keys.push(OPEN);
+        }
+        keys.push(FIX_ALL);
+        keys.extend_from_slice(extra);
+        keys.extend([DEL, FIND, REFRESH, QUIT]);
+        keys
     };
-    f.render_widget(Paragraph::new(format!(" {text}")).style(style), area);
+    let keys: Vec<&str> = if app.load_error.is_some() {
+        UNSET_KEYS.to_vec()
+    } else if app.view == View::Houses {
+        let file = match app.house_row() {
+            Some(HouseRow::Project(i)) => app
+                .projects
+                .as_ref()
+                .and_then(|p| p.list.get(i))
+                .map(|x| x.host.clone()),
+            Some(HouseRow::Agent(a)) => app
+                .houses
+                .as_ref()
+                .and_then(|h| h.cells.get(app.pcol)?.get(a))
+                .map(|c| c.at.clone())
+                .filter(|at| at.is_file()),
+            None => None,
+        };
+        with_open(file, &[])
+    } else if app.view == View::Mcp {
+        let file = match app.house_row_at(app.mrow) {
+            Some(HouseRow::Agent(a)) => app
+                .mcps
+                .as_ref()
+                .and_then(|m| m.cells.get(app.mcol)?.get(a))
+                .map(|c| c.at.clone())
+                .filter(|at| {
+                    at.is_file() && app.cfg.as_ref().is_some_and(|c| *at != c.claude_state)
+                }),
+            _ => None,
+        };
+        with_open(file, &[CREATE, EDIT])
+    } else if app.view == View::Skills {
+        SKILL_KEYS.to_vec()
+    } else if app.in_card {
+        CARD_KEYS.to_vec()
+    } else {
+        AGENT_KEYS.to_vec()
+    };
+    // A committed filter stays in front of the keys: rows are hidden, and
+    // nothing else on screen would say why.
+    let lead = match app.query.is_empty() || app.in_card {
+        true => Vec::new(),
+        false => vec![format!("/{}", app.query), BACK.to_string()],
+    };
+    f.render_widget(Paragraph::new(key_footer(&lead, &keys, area.width)), area);
 }
 
-/// The help, as one body for the reader box that `?` opens.
-pub(super) const HELP: &str = "canonize: one source of truth for your coding agents\n\n\nAgents   j/k agent · ↵ open its card · esc back to the list\n         in the card: f fix the line · d delete it\n         F fix every agent's setup\nSkills   j/k skill · h/l agent · ↵ toggle (link, unlink, or adopt an own one)\n         a link… · d delete… (this cell, row or column; an own skill itself)\n         F link every missing skill\nConventions\n         j/k agent or project · h/l convention · ↵ toggle an import\n         an agent's row: it reads the file in every project\n         a add… · d delete… (this cell, row or column)\n         F fix broken imports and CANON.md wiring\n         o open the file the import sits in\nMCPs     j/k agent or project · h/l server · ↵ toggle a server\n         n a new server, written into your canon's mcp.toml\n         e edit the server, or give it a new token\n         an agent's row: its own config, for every project\n         a add to… · d delete from… (this cell, row or column)\n         F rewrite what differs from your canon\n         D delete the server from your canon, and its token\nAnywhere tab switch · v validate your canon · E edit canonize.toml\n         r reload · ? help · q quit\n\nlinked   wired to your canon\nimported a convention is read there\nunapproved  imported, but Claude may not load it there yet\nadded    an MCP server is in that agent's config\nunwired  f wires it\nbroken   wired to the wrong thing; f repoints it\nforeign  something of yours or the agent's; left alone\nn/a      the agent has no way to use it\noff      turned off\n-        not installed (agents tab); not there (conventions, MCPs)\nown      a skill the agent keeps itself; f adopts it into your canon\n";
+/// One group of the help panel: a heading, then `(keys, what they do)` rows,
+/// where a row with no keys is a note about the group.
+type HelpSection = (&'static str, &'static [(&'static str, &'static str)]);
+
+/// Every key the app answers to, grouped by where it works. The panel scrolls,
+/// so a new row costs nothing but its line.
+const HELP: &[HelpSection] = &[
+    (
+        "moving",
+        &[
+            ("j/k ↑↓", "move a row"),
+            ("h/l ←→", "move a column"),
+            ("g G home end", "the first, last row"),
+            ("tab shift-tab", "the next, previous tab"),
+            ("space", "the same as ↵ in a grid"),
+        ],
+    ),
+    (
+        "every tab",
+        &[
+            ("/", "find in the list, esc drops it"),
+            ("r", "refresh"),
+            ("v", "validate"),
+            ("E", "edit canonize.toml"),
+            ("s", "set up"),
+            ("?", "this help"),
+            ("q ctrl-c", "quit (ctrl-c is esc in a box)"),
+        ],
+    ),
+    (
+        "agents",
+        &[("↵", "open the agent's card"), ("F", "fix all")],
+    ),
+    (
+        "in an agent's card",
+        &[
+            ("↵ f", "fix the line"),
+            ("d", "delete it"),
+            ("esc", "back to the list"),
+        ],
+    ),
+    (
+        "skills",
+        &[
+            ("↵", "on/off, adopts an own one"),
+            ("a", "add"),
+            ("d", "delete"),
+            ("F", "fix all"),
+        ],
+    ),
+    (
+        "conventions",
+        &[
+            ("↵", "on/off"),
+            ("f", "fix"),
+            ("o", "open the file the import sits in"),
+            ("a", "add"),
+            ("d", "delete"),
+            ("F", "fix all"),
+        ],
+    ),
+    (
+        "mcps",
+        &[
+            ("↵", "on/off"),
+            ("f", "fix"),
+            ("o", "open the agent's config"),
+            ("a", "add"),
+            ("d", "delete, or delete the server from the canon"),
+            ("c", "create a server"),
+            ("e", "edit it"),
+            ("F", "fix all"),
+        ],
+    ),
+    (
+        "what a cell says",
+        &[
+            ("", "linked imported added: in place"),
+            ("", "unwired broken: F fixes it"),
+            ("", "own: ↵ adopts it"),
+            ("", "foreign: yours, left alone"),
+            ("", "n/a off -: nothing"),
+            (
+                "",
+                "unapproved: imported, but Claude may not load it there yet",
+            ),
+        ],
+    ),
+    (
+        "in set up",
+        &[
+            ("↵ tab", "the next question, ↵ finishes on the last"),
+            ("shift-tab", "the previous question"),
+            ("j/k ↑↓", "pick an answer from a list"),
+            ("esc", "cancel set up"),
+        ],
+    ),
+    (
+        "in a form",
+        &[
+            ("ctrl-j/k ↑↓", "the next, previous field"),
+            ("tab shift-tab", "the next, previous field"),
+            ("h/l ←→", "step a choice"),
+            ("↵", "the next field, and submit on the last"),
+            ("esc", "cancel"),
+        ],
+    ),
+    (
+        "in a box",
+        &[
+            ("y n", "answer"),
+            ("h/l ←→ tab", "move between the buttons"),
+            ("↵", "select, or pick from a list"),
+            ("j/k ↑↓", "move in a list or scroll a message"),
+            ("esc", "cancel, or close a message"),
+        ],
+    ),
+    (
+        "in this help",
+        &[
+            ("j/k ↑↓", "scroll"),
+            ("ctrl-d ctrl-u", "half a page down, up"),
+            ("g G", "the top, the bottom"),
+            ("esc q ?", "close"),
+        ],
+    ),
+];
+
+/// The width of the key column, so every description starts in one place.
+const HELP_KEYS: usize = 16;
+
+pub(super) fn help_lines() -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (section, entries) in HELP {
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        lines.push(Line::styled(
+            *section,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+        for (keys, what) in *entries {
+            if keys.is_empty() {
+                lines.push(Line::styled(
+                    format!("  {what}"),
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+                continue;
+            }
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {keys:<HELP_KEYS$}"),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::raw(*what),
+            ]));
+        }
+    }
+    lines
+}
+
+/// The help reader: the body scrolls under a key row that never moves, with a
+/// scrollbar on the right border once it is taller than the box.
+fn render_help(f: &mut Frame, area: Rect, app: &App) {
+    let lines = help_lines();
+    let width = box_width(area.width);
+    // The body, then a blank and the key row.
+    let rect = box_area(area, width, box_height(lines.len() as u16 + 2, area.height));
+    f.render_widget(Clear, rect);
+    let block = box_block(Color::Cyan, "help");
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+
+    let shown = inner.height.saturating_sub(2) as usize;
+    // Clamped here, where the height is known, so scrolling past the end never
+    // piles up presses that then take as many to undo.
+    let top = app.help_scroll.get().min(lines.len().saturating_sub(shown));
+    app.help_scroll.set(top);
+    let body = Rect {
+        height: shown as u16,
+        ..inner
+    };
+    f.render_widget(Paragraph::new(lines[top..].to_vec()), body);
+    let keys = Rect {
+        y: inner.y + inner.height.saturating_sub(1),
+        height: 1,
+        ..inner
+    };
+    f.render_widget(Paragraph::new(box_hint(READER_KEYS)), keys);
+    if lines.len() > shown {
+        vscrollbar(f, rect, lines.len(), top, shown);
+    }
+}
 
 /// A house cell's word: `imported` for one that is wired, `-` for one that
 /// is not, since neither needs fixing.
@@ -721,7 +952,7 @@ fn render_mcp(f: &mut Frame, area: Rect, app: &App) {
     if m.servers.is_empty() {
         let (text, style) = match &m.error {
             Some(e) => (
-                format!("{e}\n\nFix it, then r reloads."),
+                format!("{e}\n\nFix it, then r refreshes."),
                 Style::default().fg(Color::Yellow),
             ),
             None if cfg.source.mcp.as_os_str().is_empty() => (
@@ -730,7 +961,7 @@ fn render_mcp(f: &mut Frame, area: Rect, app: &App) {
             ),
             None => (
                 format!(
-                    "No MCP servers yet: n describes one and writes it into {}, then ↵ adds it here to an agent, for every project, or to a project.",
+                    "No MCP servers yet: c describes one and writes it into {}, then ↵ adds it here to an agent, for every project, or to a project.",
                     tilde(&cfg.source.mcp)
                 ),
                 Style::default().add_modifier(Modifier::DIM),
@@ -810,19 +1041,11 @@ fn render_places(
     let dim = Style::default().add_modifier(Modifier::DIM);
     // The agents' section title sits on the header row, as in `canon status`.
     let title = "every project";
-    let names: Vec<String> = app
-        .grid_agents()
+    // Sized from every row, so typing a filter never shifts the columns.
+    let label_w = app
+        .all_places()
         .into_iter()
-        .map(|a| format!("  {}", cfg.agents[a].name))
-        .chain(
-            p.list
-                .iter()
-                .map(|x| format!("  {}", projects::short(cfg, &x.root))),
-        )
-        .collect();
-    let label_w = names
-        .iter()
-        .map(|n| n.chars().count())
+        .map(|r| app.place_name(r).chars().count() + 2)
         .max()
         .unwrap_or(0)
         .max(title.chars().count() + 1) as u16;
@@ -836,22 +1059,19 @@ fn render_places(
     let mut rows = Vec::new();
     // The display row of the selection, past the section lines above it.
     let mut selected = 0;
-    for (r, name) in names.iter().enumerate() {
-        let Some(row) = app.house_row_at(r) else {
-            continue;
-        };
-        let label = match row {
-            HouseRow::Project(0) => {
+    let mut projects_seen = false;
+    for (r, row) in app.place_rows().into_iter().enumerate() {
+        if matches!(row, HouseRow::Project(_)) && !projects_seen {
+            projects_seen = true;
+            if !rows.is_empty() {
                 rows.push(section(""));
-                rows.push(section("projects"));
-                Style::default()
             }
-            _ => Style::default(),
-        };
+            rows.push(section("projects"));
+        }
         if r == at.0 {
             selected = rows.len();
         }
-        let mut cells = vec![Cell::from(name.clone()).style(label)];
+        let mut cells = vec![Cell::from(format!("  {}", app.place_name(row)))];
         for (c, (word, mut style)) in states(row).into_iter().enumerate() {
             if r == at.0 && c == at.1 {
                 style = style.add_modifier(Modifier::REVERSED);

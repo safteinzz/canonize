@@ -69,7 +69,7 @@ pub(super) fn render_scope(f: &mut Frame, area: Rect, s: &Scope) {
         ]));
     }
     lines.push(Line::raw(""));
-    lines.push(box_hint("j/k ↑↓ move · enter pick · esc cancel"));
+    lines.push(box_hint(PICKER_KEYS));
     let rect = box_area(area, width, box_height(rows + 2, area.height));
     f.render_widget(Clear, rect);
     let para = Paragraph::new(lines)

@@ -59,11 +59,13 @@ pub(super) fn render_note(f: &mut Frame, area: Rect, n: &Note) {
 
     let mut lines: Vec<Line> = n.body.lines().map(|l| Line::raw(l.to_string())).collect();
     lines.push(Line::raw(""));
-    lines.push(box_hint("j/k ↑↓ scroll · esc close"));
+    lines.push(box_hint(READER_KEYS));
 
     let para = Paragraph::new(lines)
         .block(box_block(n.colour, &n.title))
         .wrap(Wrap { trim: false })
         .scroll((n.scroll, 0));
     f.render_widget(para, rect);
+    let view = rect.height.saturating_sub(BOX_CHROME_H) as usize;
+    vscrollbar(f, rect, rows as usize + 2, n.scroll as usize, view);
 }

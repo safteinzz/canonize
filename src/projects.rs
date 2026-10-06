@@ -219,7 +219,7 @@ impl Project {
             .collect()
     }
 
-    /// Everything canonize made here, for `canon remove`.
+    /// Everything canonize made here, for `canon delete`.
     pub fn undos(&self) -> Vec<Change> {
         self.cells
             .iter()

@@ -5,7 +5,6 @@ use super::Saved;
 use super::confirm::{Action, Confirm};
 use super::scope::Scope;
 use super::server_form::ServerForm;
-use super::typed::Typed;
 use super::{App, Edit, HouseRow};
 use crate::mcp::{Bearer, Spec};
 use crate::plan::{self, Change, State};
@@ -28,14 +27,13 @@ impl App {
             Char('G') | End => self.mrow = rows.saturating_sub(1),
             Char('f') => self.mcp_toggle(Some(true)),
             Enter | Char(' ') => self.mcp_toggle(None),
-            Char('n') => self.server_form = Some(ServerForm::new()),
+            Char('c') => self.server_form = Some(ServerForm::new()),
             Char('e') => match self.mcps.as_ref().and_then(|m| m.servers.get(self.mcol)) {
                 Some(s) => self.server_form = Some(ServerForm::edit(s)),
-                None => self.set_status("no MCP servers yet: n describes one"),
+                None => self.set_status("no MCP servers yet: c describes one"),
             },
             Char('a') => self.open_mcp_scope(false),
             Char('d') => self.open_mcp_scope(true),
-            Char('D') => self.delete_server(),
             Char('o') => {
                 let HouseRow::Agent(a) = self.house_row_at(self.mrow)? else {
                     return Some(None);
@@ -126,18 +124,13 @@ impl App {
         }
     }
 
-    /// `D`: the server under the cursor out of every agent and project, out
-    /// of mcp.toml, and its kept token deleted, behind its typed name, since
-    /// the token exists nowhere else.
-    fn delete_server(&mut self) {
-        let (Some(m), Some(cfg)) = (&self.mcps, &self.cfg) else {
-            return;
-        };
-        let Some(server) = m.servers.get(self.mcol) else {
-            self.set_status("no MCP servers yet: n describes one");
-            return;
-        };
-        let i = self.mcol;
+    /// Deleting server `i` from the canon: out of every agent and project,
+    /// out of mcp.toml, and its kept token deleted, as one batch that stops at
+    /// the first failure, so the canon's copy and its token go only once no
+    /// agent still names them.
+    fn delete_server(&self, i: usize) -> Option<Change> {
+        let (m, cfg) = (self.mcps.as_ref()?, self.cfg.as_ref()?);
+        let server = m.servers.get(i)?;
         let mut changes = plan::dedup(
             m.cells[i]
                 .iter()
@@ -149,31 +142,13 @@ impl App {
             name: server.name.clone(),
             token: server.kept().map(Path::to_path_buf),
         });
-        // One batch, which stops at the first failure: the canon's copy and
-        // its token go only once no agent still names them.
-        let changes = vec![Change::Batch {
+        Some(Change::Batch {
             what: format!(
                 "delete MCP server `{}` everywhere, then from your canon",
                 server.name
             ),
             changes,
-        }];
-        let name = server.name.clone();
-        let token = if server.kept().is_some_and(Path::is_file) {
-            " Its kept token is deleted too, and it exists nowhere else."
-        } else {
-            ""
-        };
-        self.typed = Some(Typed {
-            title: "delete server".into(),
-            message: format!(
-                "Delete {name} from your canon? It comes out of every agent and project that has it, and out of mcp.toml.{token}"
-            ),
-            name,
-            input: String::new(),
-            back: 0,
-            changes,
-        });
+        })
     }
 
     /// The server under the cursor, by name.
@@ -247,7 +222,7 @@ impl App {
                 )
             } else {
                 Confirm::gate(
-                    "delete",
+                    &super::gate_title(std::slice::from_ref(&change)),
                     format!("Take {name} out of {agent}'s own config?"),
                     Action::Changes(vec![change]),
                 )
@@ -305,7 +280,7 @@ impl App {
                 )
             } else {
                 Confirm::gate(
-                    "delete",
+                    &super::gate_title(std::slice::from_ref(&change)),
                     format!("Take {name} out of {project}?"),
                     Action::Changes(vec![change]),
                 )
@@ -321,7 +296,7 @@ impl App {
             return;
         };
         let Some(name) = self.mcp_server() else {
-            self.set_status("no MCP servers yet: add one to your canon's mcp.toml");
+            self.set_status("no MCP servers yet: c describes one");
             return;
         };
         let pick_agent = |c: &plan::Cell| {
@@ -382,6 +357,13 @@ impl App {
             None => return,
         };
         items.retain(|(_, changes)| !changes.is_empty());
+        // Last, so the cursor never opens on it, and behind its typed name.
+        if remove && let Some(gone) = self.delete_server(col) {
+            items.push((
+                format!("delete {name} from your canon (type its name)"),
+                vec![gone],
+            ));
+        }
         if items.is_empty() {
             self.set_status(format!(
                 "nothing to {} here",

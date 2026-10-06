@@ -123,7 +123,7 @@ pub(super) fn render_confirm(f: &mut Frame, area: Rect, c: &Confirm) {
         Line::raw(""),
         box_buttons(accent, c.yes),
         Line::raw(""),
-        box_hint("h/l ←/→ move · enter select · y/n"),
+        box_hint(GATE_KEYS),
     ]);
     let para = Paragraph::new(lines)
         .block(box_block(accent, &c.title))

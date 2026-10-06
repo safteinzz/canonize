@@ -1,4 +1,4 @@
-//! The MCP tab's `n` and `e`: a form for a new server, or for the one under
+//! The MCP tab's `c` and `e`: a form for a new server, or for the one under
 //! the cursor, saved into the canon's mcp.toml. Its token is typed here and
 //! kept outside the canon, never shown again.
 
@@ -9,8 +9,6 @@ use ratatui::widgets::{Clear, Paragraph, Wrap};
 use super::line_edit;
 use super::widgets::*;
 use crate::mcp::{Bearer, Server, Spec};
-
-const HINT: &str = "↵ next, saves on the last · esc cancel · * required";
 
 /// A row of the form. Editing a server leaves its name out, since the row it
 /// was opened from already says which server it is.
@@ -388,7 +386,9 @@ pub(super) fn render_server_form(f: &mut Frame, area: Rect, form: &ServerForm, f
     };
     lines.push(Line::styled(note.clone(), style));
     lines.push(Line::raw(""));
-    lines.push(box_hint(HINT));
+    // Name and url or command are starred on every shape of the form.
+    let keys = [FORM_KEYS, &[REQUIRED]].concat();
+    lines.push(box_hint(&keys));
 
     let w = box_width(area.width);
     let inner = box_inner_width(w);
@@ -396,11 +396,11 @@ pub(super) fn render_server_form(f: &mut Frame, area: Rect, form: &ServerForm, f
         + 1
         + wrapped_line_count(&note, inner) as u16
         + 1
-        + wrapped_line_count(HINT, inner) as u16;
+        + wrapped_line_count(&keys.join(SEP), inner) as u16;
     let r = box_area(area, w, box_height(body, area.height));
     let title = match &form.old {
         Some(s) => format!("edit {}", s.name),
-        None => "new MCP server".to_string(),
+        None => "create mcp server".to_string(),
     };
     f.render_widget(Clear, r);
     f.render_widget(

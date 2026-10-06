@@ -107,10 +107,19 @@ pub(super) struct App {
     pub(super) scope: Option<Scope>,
     /// The setup questions, while they are being answered.
     pub(super) wizard: Option<Wizard>,
-    /// A new MCP server being described, from the MCP tab's `n`.
+    /// A new MCP server being described, from the MCP tab's `c`.
     pub(super) server_form: Option<ServerForm>,
     /// A box that is only read. It owns every key until closed.
     pub(super) note: Option<Note>,
+    pub(super) show_help: bool,
+    /// The first help row on screen; `render_help` clamps it to the end.
+    pub(super) help_scroll: Cell<usize>,
+    /// The `/` filter over the current tab's rows, dropped when the tab changes.
+    pub(super) query: String,
+    /// The cursor in `query`, as characters after it (`line_edit::edit`).
+    pub(super) query_back: usize,
+    /// Whether keys are going into `query` rather than to the tab.
+    pub(super) searching: bool,
     pub(super) status: String,
     pub(super) status_failed: bool,
     pub(super) status_at: Option<Instant>,
@@ -148,6 +157,11 @@ impl App {
             wizard: None,
             server_form: None,
             note: None,
+            show_help: false,
+            help_scroll: Cell::new(0),
+            query: String::new(),
+            query_back: 0,
+            searching: false,
             status: String::new(),
             status_failed: false,
             status_at: None,
@@ -166,7 +180,7 @@ impl App {
         // The skill under the cursor, so a change that reorders the rows (an
         // adopt, say) leaves the cursor on the same skill.
         let skill = self.plan.as_ref().and_then(|p| {
-            let r = *p.skill_rows().get(self.srow)?;
+            let r = *self.skill_list().get(self.srow)?;
             Some(p.rows[r].label())
         });
         match config::load() {
@@ -193,13 +207,10 @@ impl App {
         let (_, cols) = self.size();
         self.col = self.col.min(cols.saturating_sub(1));
         self.aline = self.aline.min(self.card_lines().len().saturating_sub(1));
-        let skills = self.plan.as_ref().map_or(0, |p| p.skill_rows().len());
-        self.srow = self.srow.min(skills.saturating_sub(1));
+        let skills = self.skill_list();
+        self.srow = self.srow.min(skills.len().saturating_sub(1));
         if let (Some(name), Some(p)) = (skill, &self.plan)
-            && let Some(n) = p
-                .skill_rows()
-                .iter()
-                .position(|r| p.rows[*r].label() == name)
+            && let Some(n) = skills.iter().position(|r| p.rows[*r].label() == name)
         {
             self.srow = n;
         }
@@ -238,9 +249,30 @@ impl App {
             .map(|_| self.status.as_str())
     }
 
+    /// Whether a box or a form is up, which owns every key while it is.
+    fn boxed(&self) -> bool {
+        self.show_help
+            || self.wizard.is_some()
+            || self.note.is_some()
+            || self.server_form.is_some()
+            || self.confirm.is_some()
+            || self.typed.is_some()
+            || self.scope.is_some()
+    }
+
     fn on_key(&mut self, key: KeyEvent) -> Option<Edit> {
+        let mut key = key;
+        // Ctrl-C quits from a view and is Esc anywhere else, so a reflex one
+        // steps out one level at a time.
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            self.should_quit = true;
+            if !self.boxed() && !self.searching {
+                self.should_quit = true;
+                return None;
+            }
+            key = KeyEvent::from(KeyCode::Esc);
+        }
+        if self.show_help {
+            self.help_key(key);
             return None;
         }
         if let Some(w) = &mut self.wizard {
@@ -317,15 +349,38 @@ impl App {
             return None;
         }
 
+        if self.searching {
+            self.search_key(key);
+            return None;
+        }
+
         use KeyCode::*;
-        if key.code == Tab || key.code == BackTab {
+        if matches!(key.code, Tab | BackTab) {
+            const VIEWS: [View; 4] = [View::Agents, View::Skills, View::Houses, View::Mcp];
+            let i = VIEWS.iter().position(|v| *v == self.view).unwrap_or(0);
+            let step = if key.code == Tab { 1 } else { VIEWS.len() - 1 };
             self.in_card = false;
-            self.view = match self.view {
-                View::Agents => View::Skills,
-                View::Skills => View::Houses,
-                View::Houses => View::Mcp,
-                View::Mcp => View::Agents,
-            };
+            self.view = VIEWS[(i + step) % VIEWS.len()];
+            // A filter belongs to the list it was typed over; carried into the
+            // next tab it would hide rows nobody searched for.
+            self.query.clear();
+            self.query_back = 0;
+            return None;
+        }
+        // The agents list filters, the card opened from it does not.
+        let listing = self.load_error.is_none() && !(self.view == View::Agents && self.in_card);
+        if listing && key.code == Char('/') {
+            self.query.clear();
+            self.query_back = 0;
+            self.searching = true;
+            self.requery();
+            return None;
+        }
+        if listing && key.code == Esc && !self.query.is_empty() {
+            self.query.clear();
+            self.query_back = 0;
+            self.requery();
+            self.set_status("filter cleared");
             return None;
         }
         if self.view == View::Mcp
@@ -421,13 +476,30 @@ impl App {
         }
         let (_, agents) = self.size();
         let lines = self.card_lines().len();
-        let skills = self.plan.as_ref().map_or(0, |p| p.skill_rows().len());
+        let skills = self.skill_list().len();
         // Agents: j/k walks the list, or the card once Enter has opened it.
         // Skills: j/k picks the skill, h/l the agent.
         if self.view == View::Agents {
-            if !self.in_card && key.code == Enter {
-                self.in_card = true;
-                return None;
+            let shown = self.agent_rows();
+            let at = shown.iter().position(|&a| a == self.col);
+            if !self.in_card {
+                let to = match key.code {
+                    Down | Char('j') => at.map_or(0, |i| i + 1).min(shown.len().saturating_sub(1)),
+                    Up | Char('k') => at.map_or(0, |i| i.saturating_sub(1)),
+                    Char('g') | Home => 0,
+                    Char('G') | End => shown.len().saturating_sub(1),
+                    Enter => {
+                        self.in_card = at.is_some();
+                        return None;
+                    }
+                    _ => usize::MAX,
+                };
+                if to != usize::MAX {
+                    if let Some(&a) = shown.get(to) {
+                        self.col = a;
+                    }
+                    return None;
+                }
             }
             if self.in_card && key.code == Esc {
                 self.in_card = false;
@@ -442,8 +514,7 @@ impl App {
         let mut none = 0usize;
         let (vert, vert_max, horiz, horiz_max) = match self.view {
             View::Skills => (&mut self.srow, skills, &mut self.col, agents),
-            _ if self.in_card => (&mut self.aline, lines, &mut none, 0),
-            _ => (&mut self.col, agents, &mut none, 0),
+            _ => (&mut self.aline, lines, &mut none, 0),
         };
         match key.code {
             Down | Char('j') => {
@@ -475,15 +546,39 @@ impl App {
         self.anywhere(key)
     }
 
+    /// Keys while the help is up: it scrolls, and closes on esc, `q` or `?`.
+    fn help_key(&mut self, key: KeyEvent) {
+        use KeyCode::*;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let half = 10;
+        let top = self.help_scroll.get();
+        match key.code {
+            Char('?' | 'q') | Esc => self.show_help = false,
+            Char('d') if ctrl => self.help_scroll.set(top.saturating_add(half)),
+            Char('u') if ctrl => self.help_scroll.set(top.saturating_sub(half)),
+            PageDown => self.help_scroll.set(top.saturating_add(half)),
+            PageUp => self.help_scroll.set(top.saturating_sub(half)),
+            Char('j') | Down => self.help_scroll.set(top.saturating_add(1)),
+            Char('k') | Up => self.help_scroll.set(top.saturating_sub(1)),
+            Char('g') | Home => self.help_scroll.set(0),
+            // `render_help` clamps this to the last screenful.
+            Char('G') | End => self.help_scroll.set(usize::MAX),
+            _ => {}
+        }
+    }
+
     /// The keys every tab answers to.
     fn anywhere(&mut self, key: KeyEvent) -> Option<Edit> {
         use KeyCode::*;
         match key.code {
-            Char('q') | Esc => self.should_quit = true,
-            Char('?') => self.note = Some(Note::reader("help", render::HELP.to_string())),
+            Char('q') => self.should_quit = true,
+            Char('?') => {
+                self.show_help = true;
+                self.help_scroll.set(0);
+            }
             Char('r') => {
                 self.reload();
-                self.set_status("reloaded");
+                self.set_status("refreshed");
             }
             Char('f') | Enter => self.agent_cell(true),
             Char('F') => self.offer_fix_all(),
@@ -646,6 +741,26 @@ impl App {
             self.set_status(format!("nothing to {}: {label}", verb.to_lowercase()));
             return;
         }
+        // Deleting a server from the canon takes its typed name, since its
+        // kept token exists nowhere else.
+        if let Some((name, token)) = undefined_server(&changes) {
+            let token = if token.is_some_and(|t| t.is_file()) {
+                " Its kept token is deleted too, and it exists nowhere else."
+            } else {
+                ""
+            };
+            self.typed = Some(Typed {
+                title: "delete server".into(),
+                message: format!(
+                    "Delete {name} from your canon? It comes out of every agent and project that has it, and out of mcp.toml.{token}"
+                ),
+                name: name.to_string(),
+                input: String::new(),
+                back: 0,
+                changes,
+            });
+            return;
+        }
         // Deleting a real folder takes its typed name.
         if let Some(at) = deleted_dir(&changes) {
             let name = at
@@ -676,12 +791,19 @@ impl App {
             return;
         }
         let runs = Self::runs(&changes);
-        let title = verb.to_lowercase();
         self.confirm = Some(
             if remove {
-                Confirm::gate(&title, format!("{verb} {label}?"), Action::Changes(changes))
+                Confirm::gate(
+                    &gate_title(&changes),
+                    format!("{verb} {label}?"),
+                    Action::Changes(changes),
+                )
             } else {
-                Confirm::offer(&title, format!("{verb} {label}?"), Action::Changes(changes))
+                Confirm::offer(
+                    &verb.to_lowercase(),
+                    format!("{verb} {label}?"),
+                    Action::Changes(changes),
+                )
             }
             .runs(runs),
         );
@@ -695,7 +817,7 @@ impl App {
             return;
         };
         let rows = plan.skill_rows();
-        let Some(&r) = rows.get(self.srow) else {
+        let Some(&r) = self.skill_list().get(self.srow) else {
             return;
         };
         let agent = cfg.agents[self.col].name.clone();
@@ -814,9 +936,8 @@ impl App {
 
     /// The plan row the selection stands on, or `None` on the skills summary.
     pub(super) fn selected_row(&self) -> Option<usize> {
-        let plan = self.plan.as_ref()?;
         match self.view {
-            View::Skills => plan.skill_rows().get(self.srow).copied(),
+            View::Skills => self.skill_list().get(self.srow).copied(),
             _ => match self.card_lines().get(self.aline)? {
                 CardLine::Row(r) => Some(*r),
                 CardLine::Skills => None,
@@ -861,7 +982,7 @@ impl App {
                 )
             } else {
                 Confirm::gate(
-                    "delete",
+                    &gate_title(&changes),
                     format!("Delete every skill link canonize made for {name}? Your canon stays."),
                     Action::Changes(changes),
                 )
@@ -926,7 +1047,7 @@ impl App {
                 )
             } else {
                 Confirm::gate(
-                    "delete",
+                    &gate_title(std::slice::from_ref(&change)),
                     format!("Delete {what}? Your files in the canon stay."),
                     Action::Changes(vec![change.clone()]),
                 )
@@ -992,9 +1113,132 @@ impl App {
         });
     }
 
+    /// What the `/` filter keeps of a row named `name`: all of them with no
+    /// query, else the ones holding it, case aside, or holding its characters
+    /// in order, so `cl` finds `dev/crates/cli`.
+    fn kept(&self, name: &str) -> bool {
+        let q = self.query.trim().to_lowercase();
+        let name = name.to_lowercase();
+        let mut chars = name.chars();
+        q.is_empty() || name.contains(&q) || q.chars().all(|c| chars.any(|h| h == c))
+    }
+
+    /// The agents the agents tab lists, by index into `cfg.agents`.
+    pub(super) fn agent_rows(&self) -> Vec<usize> {
+        self.cfg.as_ref().map_or(Vec::new(), |c| {
+            (0..c.agents.len())
+                .filter(|&a| self.kept(&c.agents[a].name))
+                .collect()
+        })
+    }
+
+    /// The skills tab's rows, as plan rows; `srow` indexes this.
+    pub(super) fn skill_list(&self) -> Vec<usize> {
+        self.plan.as_ref().map_or(Vec::new(), |p| {
+            p.skill_rows()
+                .into_iter()
+                .filter(|&r| self.kept(&p.rows[r].label()))
+                .collect()
+        })
+    }
+
+    /// Rows in the conventions and MCP tabs: every agent, then every project,
+    /// before the filter, so a detail pane sized from them keeps its height.
+    pub(super) fn all_places(&self) -> Vec<HouseRow> {
+        let projects = self.projects.as_ref().map_or(0, |p| p.list.len());
+        self.grid_agents()
+            .into_iter()
+            .map(HouseRow::Agent)
+            .chain((0..projects).map(HouseRow::Project))
+            .collect()
+    }
+
+    /// The name a conventions or MCP row goes by, which is what `/` matches.
+    pub(super) fn place_name(&self, row: HouseRow) -> String {
+        match (row, &self.cfg, &self.projects) {
+            (HouseRow::Agent(a), Some(c), _) => c.agents[a].name.clone(),
+            (HouseRow::Project(i), Some(c), Some(p)) => projects::short(c, &p.list[i].root),
+            _ => String::new(),
+        }
+    }
+
+    /// The conventions and MCP tabs' rows; `prow` and `mrow` index this.
+    pub(super) fn place_rows(&self) -> Vec<HouseRow> {
+        self.all_places()
+            .into_iter()
+            .filter(|&r| self.kept(&self.place_name(r)))
+            .collect()
+    }
+
     /// Rows in the houses tab: every agent, then every project.
     pub(super) fn house_rows(&self) -> usize {
-        self.grid_agents().len() + self.projects.as_ref().map_or(0, |p| p.list.len())
+        self.place_rows().len()
+    }
+
+    /// Rows the current tab shows once filtered.
+    pub(super) fn row_count(&self) -> usize {
+        match self.view {
+            View::Agents => self.agent_rows().len(),
+            View::Skills => self.skill_list().len(),
+            View::Houses | View::Mcp => self.house_rows(),
+        }
+    }
+
+    /// Keep the selection on a row the filter still shows.
+    fn requery(&mut self) {
+        let shown = self.agent_rows();
+        if !shown.contains(&self.col)
+            && self.view == View::Agents
+            && let Some(&a) = shown.first()
+        {
+            self.col = a;
+        }
+        self.srow = self.srow.min(self.skill_list().len().saturating_sub(1));
+        let places = self.house_rows().saturating_sub(1);
+        self.prow = self.prow.min(places);
+        self.mrow = self.mrow.min(places);
+    }
+
+    /// A key while `/` is being typed: every letter goes into the query and the
+    /// list narrows under it. Enter keeps the filter and hands the keys back
+    /// to the tab; Esc drops it.
+    fn search_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.query.clear();
+                self.query_back = 0;
+                self.searching = false;
+            }
+            KeyCode::Enter => self.searching = false,
+            KeyCode::Down | KeyCode::Up => {
+                let down = key.code == KeyCode::Down;
+                let n = self.row_count().saturating_sub(1);
+                let step = |at: usize| {
+                    if down {
+                        (at + 1).min(n)
+                    } else {
+                        at.saturating_sub(1)
+                    }
+                };
+                match self.view {
+                    View::Agents => {
+                        let shown = self.agent_rows();
+                        let at = shown.iter().position(|&a| a == self.col).unwrap_or(0);
+                        if let Some(&a) = shown.get(step(at)) {
+                            self.col = a;
+                        }
+                    }
+                    View::Skills => self.srow = step(self.srow),
+                    View::Houses => self.prow = step(self.prow),
+                    View::Mcp => self.mrow = step(self.mrow),
+                }
+                return;
+            }
+            _ => {
+                line_edit::edit(&mut self.query, &mut self.query_back, key);
+            }
+        }
+        self.requery();
     }
 
     /// The agents the conventions and MCP tabs have a row for: the ones
@@ -1007,14 +1251,9 @@ impl App {
         })
     }
 
-    /// What the houses tab's row `r` is.
+    /// What the houses tab's row `r` is, counted over the filtered rows.
     pub(super) fn house_row_at(&self, r: usize) -> Option<HouseRow> {
-        let agents = self.grid_agents();
-        if let Some(&a) = agents.get(r) {
-            return Some(HouseRow::Agent(a));
-        }
-        let i = r - agents.len();
-        (i < self.projects.as_ref()?.list.len()).then_some(HouseRow::Project(i))
+        self.place_rows().get(r).copied()
     }
 
     pub(super) fn house_row(&self) -> Option<HouseRow> {
@@ -1091,7 +1330,7 @@ impl App {
                 )
             } else {
                 Confirm::gate(
-                    "delete",
+                    &gate_title(&changes),
                     format!("Stop {name} importing {file}?"),
                     Action::Changes(changes),
                 )
@@ -1144,7 +1383,7 @@ impl App {
                 )
             } else {
                 Confirm::gate(
-                    "delete",
+                    &gate_title(std::slice::from_ref(&change)),
                     format!("Stop {agent} reading {file}?"),
                     Action::Changes(vec![change]),
                 )
@@ -1337,4 +1576,28 @@ fn deleted_dir(changes: &[Change]) -> Option<&PathBuf> {
         Change::Batch { changes, .. } => deleted_dir(changes),
         _ => None,
     })
+}
+
+/// The server a delete would take out of the canon, and its kept token,
+/// inside a batch as well.
+fn undefined_server(changes: &[Change]) -> Option<(&str, Option<&PathBuf>)> {
+    changes.iter().find_map(|c| match c {
+        Change::McpUndefine { name, token, .. } => Some((name.as_str(), token.as_ref())),
+        Change::Batch { changes, .. } => undefined_server(changes),
+        _ => None,
+    })
+}
+
+/// A gate's title, naming what it is in front of by the first change it runs.
+fn gate_title(changes: &[Change]) -> String {
+    let many = changes.len() > 1;
+    let noun = |one: &str, more: &str| format!("delete {}", if many { more } else { one });
+    match changes.first() {
+        Some(Change::Batch { changes, .. }) => gate_title(changes),
+        Some(Change::Unlink { .. }) => noun("link", "links"),
+        Some(Change::RemoveImport { .. }) => noun("import", "imports"),
+        Some(Change::McpRemove { .. }) => noun("server entry", "server entries"),
+        Some(c) => c.verb().to_string(),
+        None => "delete".to_string(),
+    }
 }
