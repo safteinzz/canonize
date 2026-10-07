@@ -2,7 +2,7 @@
 # A staged home for the README pictures: a canon that was just moved from
 # ~/dotfiles/development to ~/dotfiles/canon, a Claude whose CLAUDE.md still
 # imports the old path, a Codex with nothing wired yet, a few projects importing
-# house files from the old folder, and skills in both places. Nothing here
+# conventions from the old folder, and skills in both places. Nothing here
 # touches your real home: every path, XDG variables included, is redirected
 # into ./home.
 #
@@ -48,11 +48,11 @@ skill() {
 
 write_canon() {
   local c="$STAGE/dotfiles/canon"
-  mkdir -p "$c/house"
+  mkdir -p "$c/conventions"
   cp "$TEMPLATES/rules.yaml" "$c/rules.yaml"
   cp "$TEMPLATES/rules.schema.json" "$c/rules.schema.json"
-  printf '# HOUSE-RUST.md\n\nHow the Rust crates are checked and shipped.\n' > "$c/house/HOUSE-RUST.md"
-  printf '# HOUSE-TUI.md\n\nHow the terminal interfaces are built.\n' > "$c/house/HOUSE-TUI.md"
+  printf '# rust.md\n\nHow the Rust crates are checked and shipped.\n' > "$c/conventions/rust.md"
+  printf '# tui.md\n\nHow the terminal interfaces are built.\n' > "$c/conventions/tui.md"
   skill "$c/skills/code-review" "Review the current changes against the rules"
   skill "$c/skills/release" "Walk a crate through its release steps"
 }
@@ -69,9 +69,9 @@ write_agents() {
 write_projects() {
   local d="$STAGE/dev"
   mkdir -p "$d/crates/api" "$d/crates/cli" "$d/web/site"
-  printf '@~/dotfiles/development/HOUSE-RUST.md\n@~/dotfiles/development/HOUSE-TUI.md\n@AGENTS.md\n' > "$d/crates/api/CLAUDE.md"
+  printf '@~/dotfiles/development/conventions/rust.md\n@~/dotfiles/development/conventions/tui.md\n@AGENTS.md\n' > "$d/crates/api/CLAUDE.md"
   printf '# api\n' > "$d/crates/api/AGENTS.md"
-  printf '@~/dotfiles/development/HOUSE-RUST.md\n@AGENTS.md\n' > "$d/crates/cli/CLAUDE.md"
+  printf '@~/dotfiles/development/conventions/rust.md\n@AGENTS.md\n' > "$d/crates/cli/CLAUDE.md"
   printf '# cli\n' > "$d/crates/cli/AGENTS.md"
   printf '# site\n' > "$d/web/site/AGENTS.md"
   local r

@@ -1,4 +1,4 @@
-# The projects tab: a broken import repointed with Enter, one house file
+# The projects tab: a broken import repointed with Enter, one convention
 # added to every project with a…, and the remove choices with d.
 #
 #   ./render.sh projects
@@ -31,6 +31,8 @@ Enter
 Sleep 1s
 Tab
 Tab
+# Past the agent rows, onto the first project and its broken import.
+Type "jjjj"
 Sleep 300ms
 Show
 Sleep 1.5s
@@ -42,6 +44,8 @@ Type "F"
 Sleep 1.5s
 Type "y"
 Sleep 1.2s
+Type "j"
+Sleep 500ms
 Type "l"
 Sleep 500ms
 Type "a"

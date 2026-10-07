@@ -108,9 +108,9 @@ A token you type is kept outside your canon, readable by you alone, so your dotf
 ![canon move renaming the canon folder and repointing every import, link and shortcut that named the old path](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/move.png)
 
 ```bash
-canon move canon ~/dotfiles/canon        # the whole folder
-canon move house conventions             # something inside it, renamed
-canon move ~/old/canon ~/dotfiles/canon  # one you already moved by hand: repoint only
+canon move canon ~/dotfiles/canon                     # the whole folder
+canon move conventions/tui.md conventions/terminal.md # something inside it, renamed
+canon move ~/old/canon ~/dotfiles/canon               # one you already moved by hand: repoint only
 ```
 
 Every import, link and setting that named the old path is repointed, and running the same command again finishes a move that stopped halfway.
