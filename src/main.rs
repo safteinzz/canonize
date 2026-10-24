@@ -37,6 +37,7 @@ mod setup;
 #[cfg(test)]
 mod tmp;
 mod tui;
+mod workspaces;
 
 use clap::{Parser, Subcommand};
 
@@ -67,8 +68,8 @@ const AFTER: &str = concat!(
 \x1b[1mMCP servers:\x1b[0m
   A table each in your canon's mcp.toml: a `url` (`token = true` for one typed in
   the TUI and kept outside your canon; `--json` `token`: kept, missing) or a
-  `command`. The TUI's MCPs tab adds one to an agent or project (c create,
-  e edit, d delete); `fix` rewrites what differs, `delete` takes them back.
+  `command`. The TUI adds one: the MCPs tab to an agent or project, a
+  workspace's card to it. `fix` rewrites what differs, `delete` takes them back.
 
 Your canon is `$CANONIZE_SOURCE`, else your config folder (~/.config/canonize,
 and ~/Library/Application Support/canonize on macOS), and holds canonize.toml.
@@ -87,6 +88,21 @@ Run `canon <command> --help` for a command's details.",
     "\ncontributors: ",
     env!("CARGO_PKG_AUTHORS"),
 );
+
+/// `canon link --help`: what a workspace is, which the command list has no
+/// room for.
+const LINK_ABOUT: &str =
+    "Point a folder you work in outside your projects' repos (notes, replies, data,
+a folder per issue under it) at the projects it is for. Linking it again adds
+more, and `canon unlink <WORKSPACE> <PROJECT>` drops one. canonize writes a
+CLAUDE.md and an AGENTS.md at the folder's top naming each project and the
+files to read there, its conventions included, and the folder's own CONTEXT.md
+and CANON.md. CONTEXT.md is yours: notes every agent there reads, and adds to
+when told to remember something. CANON.md holds the folder's own conventions
+(`canon add <CONVENTION> <WORKSPACE>`), and the TUI gives it MCP servers. An
+agent that reads instructions from parent folders reads all of it from any
+folder under it. Outside a git repo, Codex reads only the folder it starts in
+and Claude keeps MCP servers per folder: `git init` there fixes both.";
 
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -127,23 +143,32 @@ enum Cmd {
     ///   -n        dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Fix(cli::ChangeArgs),
-    /// Delete every link, import and MCP entry canonize made, and nothing else
+    /// Delete every link, import, workspace file and MCP entry canonize made, and nothing else
     ///   -a NAME   only this agent
     ///   -n        dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Delete(cli::ChangeArgs),
-    /// Make projects, or an agent in every project, read one convention  <CONVENTION> [PROJECT]...
-    ///   -a NAME                 an agent, which then reads it in every project
-    ///   --every project|agent   every project, or every agent that can read it
-    ///   -n                      dry run: print what would change and change nothing
+    /// Make projects, workspaces, or an agent everywhere, read one convention  <CONVENTION> [PLACE]...
+    ///   -a NAME                           an agent, which then reads it in every project
+    ///   --every project|workspace|agent   every project, workspace, or agent that can read it
+    ///   -n                                dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Add(cli::PlaceArgs),
-    /// Stop projects, or an agent, reading one convention  <CONVENTION> [PROJECT]...
-    ///   -a NAME                 an agent, which then reads it in no project
-    ///   --every project|agent   every project, or every agent
-    ///   -n                      dry run: print what would change and change nothing
+    /// Stop projects, workspaces, or an agent, reading one convention  <CONVENTION> [PLACE]...
+    ///   -a NAME                           an agent, which then reads it in no project
+    ///   --every project|workspace|agent   every project, workspace, or agent
+    ///   -n                                dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Remove(cli::PlaceArgs),
+    /// Point a folder you work in outside your projects' repos at the ones it is for  <WORKSPACE> <PROJECT>...
+    ///   -n        dry run: print what would change and change nothing
+    #[command(verbatim_doc_comment, long_about = LINK_ABOUT)]
+    Link(cli::LinkArgs),
+    /// Drop projects from a workspace, or take back all canonize made there and forget it  [WORKSPACE] [PROJECT]...
+    ///   --all     every workspace
+    ///   -n        dry run: print what would change and change nothing
+    #[command(verbatim_doc_comment)]
+    Unlink(cli::UnlinkArgs),
     /// Validate your canon: the rules file against its schema, every SKILL.md, mcp.toml
     ///   --json    print it for a script instead of a person
     #[command(verbatim_doc_comment)]
@@ -165,7 +190,7 @@ enum Cmd {
     ///   -n        dry run: print what would change and change nothing
     #[command(verbatim_doc_comment)]
     Evict(cli::EvictArgs),
-    /// Move your canon, or something in it, and repoint every import and link  <WHAT> <TO>
+    /// Move your canon, something in it, a workspace or a project, and repoint what named it  <WHAT> <TO>
     ///   canon move canon ~/dotfiles/canon        the whole folder, agents repointed
     ///   canon move house conventions             renamed, or into a folder that is there
     #[command(verbatim_doc_comment)]
@@ -193,6 +218,8 @@ fn main() {
         Some(Cmd::Delete(a)) => cli::delete(a),
         Some(Cmd::Add(a)) => cli::place(a, false),
         Some(Cmd::Remove(a)) => cli::place(a, true),
+        Some(Cmd::Link(a)) => cli::link(a),
+        Some(Cmd::Unlink(a)) => cli::unlink(a),
         Some(Cmd::Validate(a)) => cli::validate(a),
         Some(Cmd::Setup(a)) => cli::setup(a),
         Some(Cmd::Adopt(a)) => cli::adopt(a),
@@ -208,8 +235,34 @@ fn main() {
     match res {
         Ok(code) => std::process::exit(code),
         Err(e) => {
-            eprintln!("canon: {e:#}");
+            eprintln!("canon: {}", said(&e));
             std::process::exit(1);
         }
     }
+}
+
+/// `e` as the user reads it: each step of its chain, an OS error in the OS's
+/// own words without its number.
+pub fn said(e: &anyhow::Error) -> String {
+    e.chain()
+        .map(|cause| match cause.downcast_ref::<std::io::Error>() {
+            Some(io) => os_words(io),
+            None => cause.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+/// An OS error in the OS's own words, lowercase and without its number.
+pub fn os_words(io: &std::io::Error) -> String {
+    let words = io.to_string();
+    let words = match words.rfind(" (os error ") {
+        Some(at) if words.ends_with(')') => words[..at].to_string(),
+        _ => words,
+    };
+    let mut chars = words.chars();
+    chars
+        .next()
+        .map(|c| c.to_lowercase().chain(chars).collect())
+        .unwrap_or_default()
 }

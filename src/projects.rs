@@ -1,7 +1,7 @@
 //! Projects: the repos under the user's project folders, and which house files
 //! each one imports from the canon.
 //!
-//! A project is a folder with a `CLAUDE.md` or `AGENTS.md`. Its house imports
+//! A project is a folder with one of `MARKERS`. Its house imports
 //! live in its own `CANON.md`, gitignored and written only by canonize, which
 //! each agent loads its own way (Claude through `@CANON.md` in a gitignored
 //! `CLAUDE.local.md`). House imports still sitting in CLAUDE.md or AGENTS.md,
@@ -19,13 +19,24 @@ const DEPTH: usize = 3;
 /// Folders never worth walking into.
 const SKIP: [&str; 4] = ["target", "node_modules", "dist", "build"];
 
-/// The instruction files a project can carry, most specific first: canonize
-/// writes new imports into the first one that exists.
+/// The files whose `@` lines are a project's convention imports from before
+/// they lived in CANON.md, which a fix moves into it.
 const FILES: [&str; 2] = ["CLAUDE.md", "AGENTS.md"];
+
+/// Any file an agent reads as a project's instructions, or canonize's own
+/// CANON.md, makes its folder a project; `o` opens the first one there.
+const MARKERS: [&str; 6] = [
+    "CLAUDE.md",
+    ".claude/CLAUDE.md",
+    "AGENTS.md",
+    "AGENTS.override.md",
+    LOCAL_FILE,
+    CANON_FILE,
+];
 
 pub struct Project {
     pub root: PathBuf,
-    /// The project's own instruction file, for `o`: CLAUDE.md, else AGENTS.md.
+    /// The project's own instruction file, for `o`: the first of `MARKERS` it has.
     pub host: PathBuf,
     /// What makes the agents read CANON.md here.
     pub wiring: Vec<Wire>,
@@ -120,8 +131,16 @@ impl Projects {
     pub fn build(cfg: &Config) -> Projects {
         let house = config::house_files(&cfg.source);
         let mut roots = Vec::new();
+        // A workspace's own CLAUDE.md is canonize's, and holds no project.
+        let skip: Vec<PathBuf> = cfg
+            .workspaces
+            .iter()
+            .filter_map(|w| fs::canonicalize(&w.root).ok())
+            .collect();
         for dir in &cfg.projects {
-            walk(dir, 0, &mut roots);
+            if let Ok(real) = fs::canonicalize(dir) {
+                walk(dir, &real, 0, &skip, &mut roots);
+            }
         }
         roots.sort();
         roots.dedup();
@@ -239,27 +258,47 @@ pub fn short(cfg: &Config, root: &Path) -> String {
         .unwrap_or_else(|| tilde(root))
 }
 
-fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
-    if FILES.iter().any(|f| dir.join(f).is_file()) {
+/// `real` is `dir`'s real path, which holds for every folder below it
+/// because links are never followed.
+fn walk(dir: &Path, real: &Path, depth: usize, skip: &[PathBuf], out: &mut Vec<PathBuf>) {
+    if skip.iter().any(|s| s == real) {
+        return;
+    }
+    // One listing answers what a stat per marker would, and each stat is a
+    // round trip on a network or WSL drive.
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let entries: Vec<fs::DirEntry> = entries.flatten().collect();
+    if marked(dir, &entries) {
         out.push(dir.to_path_buf());
         return;
     }
     if depth >= DEPTH {
         return;
     }
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for e in entries.flatten() {
+    for e in entries {
         let name = e.file_name().to_string_lossy().into_owned();
-        let path = e.path();
         // A link is skipped so a folder linked into itself cannot loop.
         let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
         if !is_dir || name.starts_with('.') || SKIP.contains(&name.as_str()) {
             continue;
         }
-        walk(&path, depth + 1, out);
+        walk(&e.path(), &real.join(&name), depth + 1, skip, out);
     }
+}
+
+/// Whether `dir`, listed as `entries`, holds one of `MARKERS`.
+fn marked(dir: &Path, entries: &[fs::DirEntry]) -> bool {
+    // Home's `.claude/CLAUDE.md` is Claude's global rules file, not a project's.
+    let home = dirs::home_dir().is_some_and(|h| h == dir);
+    MARKERS
+        .iter()
+        .filter(|f| !(home && **f == ".claude/CLAUDE.md"))
+        .any(|f| {
+            let first = f.split('/').next().unwrap_or(f);
+            entries.iter().any(|e| e.file_name() == first) && dir.join(f).is_file()
+        })
 }
 
 /// Every `@path` line across a project's instruction files, with the file it
@@ -289,15 +328,31 @@ fn imports(root: &Path) -> Vec<(PathBuf, String, PathBuf)> {
     out
 }
 
-fn project(root: &Path, house: &[PathBuf], claude: bool) -> Project {
-    let host = FILES
+pub(crate) fn project(root: &Path, house: &[PathBuf], claude: bool) -> Project {
+    read(root, house, claude, imports(root))
+}
+
+/// A workspace's own conventions, read from its CANON.md alone: the CLAUDE.md
+/// and AGENTS.md at its top are canonize's, with no `@` line, or the user's.
+pub(crate) fn workspace(root: &Path, house: &[PathBuf]) -> Project {
+    read(root, house, false, Vec::new())
+}
+
+/// The project at `root`, with `legacy` the convention imports found outside
+/// its CANON.md, which a fix moves into it.
+fn read(
+    root: &Path,
+    house: &[PathBuf],
+    claude: bool,
+    legacy: Vec<(PathBuf, String, PathBuf)>,
+) -> Project {
+    let host = MARKERS
         .iter()
         .map(|f| root.join(f))
         .find(|p| p.is_file())
-        .unwrap_or_else(|| root.join(FILES[0]));
+        .unwrap_or_else(|| root.join(MARKERS[0]));
     let canon = root.join(CANON_FILE);
     let in_canon = imports_in(&canon, root);
-    let legacy = imports(root);
     let name = |p: &Path| p.file_name().map(|n| n.to_os_string());
     // The same house file: this path, or a gone file of the same name (the
     // canon moved since the line was written).

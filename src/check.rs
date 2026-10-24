@@ -54,7 +54,7 @@ pub fn run(source: &Source) -> Report {
     let mcp = match crate::mcp::load(&source.mcp, std::path::Path::new("")) {
         Ok(servers) => servers.len(),
         Err(e) => {
-            problems.push(format!("{e:#}"));
+            problems.push(crate::said(&e));
             0
         }
     };
@@ -167,7 +167,7 @@ fn walk_rules(v: &Value, f: &mut dyn FnMut(&Value)) {
 fn check_schema(source: &Source, doc: &Value, problems: &mut Vec<String>) {
     let schema_file = tilde(&source.schema);
     let schema: serde_json::Value = match fs::read_to_string(&source.schema)
-        .map_err(|e| e.to_string())
+        .map_err(|e| crate::os_words(&e))
         .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
     {
         Ok(s) => s,

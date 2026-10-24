@@ -347,7 +347,7 @@ pub(super) fn render_wizard(f: &mut Frame, area: Rect, w: &Wizard) {
                     note.push("It does not exist yet; setup creates it.".into());
                 }
             } else if w.step == Step::Projects {
-                note.push("Folders, comma separated. canonize looks up to three levels down for a CLAUDE.md or AGENTS.md; leave it empty to skip projects.".into());
+                note.push("Folders, comma separated. canonize looks up to three levels down for a CLAUDE.md, AGENTS.md or other instructions file, or leave it empty to skip projects.".into());
                 if !crate::projects::guess().is_empty() {
                     note.push("Pre-filled with the usual project folders that exist here.".into());
                 }

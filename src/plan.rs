@@ -217,6 +217,13 @@ pub enum Change {
         name: String,
         token: Option<PathBuf>,
     },
+    /// Point a workspace at its projects under `[workspaces]` in
+    /// canonize.toml, or forget it with `None`.
+    Workspace {
+        config: PathBuf,
+        key: String,
+        projects: Option<Vec<String>>,
+    },
     /// Take an MCP server out of one agent's config; `in_project` when the
     /// file is a project's, whose folder (`.codex/`, `.pi/`) goes if emptied.
     McpRemove {
@@ -252,7 +259,15 @@ impl Change {
                 (at.path(), name)
             }
             Change::McpUndefine { file, name, .. } => (file, name),
+            Change::Workspace { config, key, .. } => (config, key),
         }
+    }
+
+    /// Whether it runs only when every change before it in the same run
+    /// worked: a workspace forgotten after something there failed to come
+    /// back would leave that listed nowhere.
+    pub fn after_all(&self) -> bool {
+        matches!(self, Change::Workspace { projects: None, .. })
     }
 
     /// The one or two words a key does this with, shown beside the key.
@@ -272,13 +287,21 @@ impl Change {
             Change::DeleteFile { .. } => "uninstall",
             Change::JsonUninstruction { .. } => "delete setting",
             Change::RemoveLine { .. } => "delete line",
-            Change::Batch { changes, .. } => changes.first().map_or("do", Change::verb),
+            // A file canonize wrote, deleted only to be written again.
+            Change::Batch { changes, .. } => match changes.as_slice() {
+                [Change::DeleteFile { .. }, Change::WriteFile { .. }, ..] => "update",
+                _ => changes.first().map_or("do", Change::verb),
+            },
             Change::Adopt { .. } => "adopt",
             Change::Evict { .. } => "evict",
             Change::Rename { .. } => "move",
             Change::McpSet { .. } => "add server",
             Change::McpRemove { .. } => "delete server",
             Change::McpUndefine { .. } => "delete from canon",
+            Change::Workspace {
+                projects: Some(_), ..
+            } => "link",
+            Change::Workspace { projects: None, .. } => "unlink",
         }
     }
 
@@ -339,6 +362,20 @@ impl Change {
                 ),
                 None => format!("delete MCP server `{name}` from {}", tilde(file)),
             },
+            Change::Workspace {
+                config,
+                key,
+                projects: Some(projects),
+            } => format!(
+                "point workspace {key} at {} in {}",
+                projects.join(", "),
+                tilde(config)
+            ),
+            Change::Workspace {
+                config,
+                key,
+                projects: None,
+            } => format!("forget workspace {key} in {}", tilde(config)),
         }
     }
 
@@ -411,6 +448,25 @@ impl Change {
                 }
                 out
             }
+            Change::Workspace {
+                config,
+                key,
+                projects: Some(projects),
+            } => {
+                let value = match projects.as_slice() {
+                    [one] => format!("\"{one}\""),
+                    many => format!("[\"{}\"]", many.join("\", \"")),
+                };
+                format!(
+                    "# under [workspaces] in {}: \"{key}\" = {value}",
+                    tilde(config)
+                )
+            }
+            Change::Workspace {
+                config,
+                key,
+                projects: None,
+            } => format!("# delete \"{key}\" from [workspaces] in {}", tilde(config)),
         }
     }
 
@@ -425,6 +481,11 @@ impl Change {
             Change::McpUndefine { file, name, token } => {
                 crate::mcp::undefine(file, name, token.as_deref())
             }
+            Change::Workspace {
+                config,
+                key,
+                projects,
+            } => config::set_workspace(config, key, projects.as_deref()),
             Change::Link { at, to } => {
                 if let Some(parent) = at.parent() {
                     fs::create_dir_all(parent)

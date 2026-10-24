@@ -131,6 +131,7 @@ pub fn config(source: Source, agents: Vec<Agent>, projects: Vec<PathBuf>) -> Con
         source,
         agents,
         projects,
+        workspaces: Vec::new(),
         path,
         // A test never reads the real ones: `~/.config/canonize` and
         // `~/.claude.json` are real paths on the machine running the suite.

@@ -35,7 +35,7 @@ Nothing is written until you say yes.
 Legend: green dot fully wired · yellow dot something needs fixing · hollow dot not installed
 
 ```bash
-canon            # the dashboard: Agents, Skills, Conventions and MCPs tabs
+canon            # the dashboard: Agents, Skills, Conventions, Workspaces and MCPs tabs
 canon status     # the same, printed
 ```
 
@@ -77,6 +77,19 @@ canon add wsl -a <agent>        # that agent reads wsl in every project
 
 Nothing lands in the repo: the imports sit in a gitignored file. An agent that asks before loading files from outside a project is listed by `canon status` until you say yes.
 
+## Work on your projects from a folder outside their repos
+
+![the workspaces tab: a folder pointed at a project with c, a second project added in its card, and a convention of its own switched on with Enter](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/workspaces.gif)
+
+```bash
+canon                                               # tab to Workspaces: c links a folder, ↵ opens its card
+canon link ~/issues/shop products/app products/web  # agents started under it are told about both
+canon add support ~/issues/shop                     # and follow a convention of its own there
+canon unlink ~/issues/shop products/web             # drop one, or name none to drop them all
+```
+
+Notes and replies stay in the folders under it, one per issue say. Your agent is pointed at each project's files and conventions, and at the folder's CONTEXT.md: notes of yours it reads first, and adds to when told to remember something. Nothing is written in the projects.
+
 ## Give every agent the same MCP servers
 
 ```bash
@@ -114,7 +127,7 @@ Nothing prompts, so a script or an agent can do all of it: `--json` on `status` 
 ## Where it keeps things
 
 ```
-<canon>/canonize.toml             which agents, and how each is wired (all optional)
+<canon>/canonize.toml             which agents, how each is wired, your workspaces (all optional)
 <canon>/rules.yaml                the rules every agent follows
 <canon>/rules.schema.json         the shape `canon validate` holds them to
 <canon>/conventions/*.md          conventions, imported by the projects or agents they fit
@@ -127,7 +140,7 @@ Nothing prompts, so a script or an agent can do all of it: `--json` on `status` 
 
 ## What it edits
 
-Only what it made: links into your canon, the lines it wrote into an agent's files and a project's `.gitignore`, and your MCP servers' entries in each agent's config. A real file is reported and left alone, and nothing is ever copied into your canon.
+Only what it made: links into your canon, lines it wrote into agents' files and `.gitignore` files, the CLAUDE.md, AGENTS.md and CANON.md at a workspace's top, and your MCP servers' entries in each agent's config. A real file is reported and left alone, and nothing is copied into your canon.
 
 ## Compatibility
 

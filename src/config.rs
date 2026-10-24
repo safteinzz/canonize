@@ -69,11 +69,24 @@ impl Agent {
     }
 }
 
+/// A folder kept outside the repos of the projects it works on (a folder per
+/// issue, say), pointed at them in `[workspaces]`.
+pub struct Workspace {
+    /// The key as `canonize.toml` spells it, which is how it is taken out.
+    pub key: String,
+    pub root: PathBuf,
+    /// The projects it is for, in the order its line lists them. canonize
+    /// never writes an empty list, but a hand-edited one loads.
+    pub projects: Vec<PathBuf>,
+}
+
 pub struct Config {
     pub source: Source,
     pub agents: Vec<Agent>,
-    /// Folders to look through for projects with a `CLAUDE.md` or `AGENTS.md`.
+    /// Folders to look through for projects: folders with a `CLAUDE.md`,
+    /// `AGENTS.md` or another file of `projects::MARKERS`.
     pub projects: Vec<PathBuf>,
+    pub workspaces: Vec<Workspace>,
     /// The file the config was read from, or where it would be.
     pub path: PathBuf,
     /// The folder `canon` looks in, which is a link to the source when the
@@ -96,6 +109,9 @@ struct RawConfig {
     source: RawSource,
     #[serde(default)]
     agents: BTreeMap<String, RawAgent>,
+    /// A project path, or a list of them, per workspace.
+    #[serde(default)]
+    workspaces: BTreeMap<String, toml::Value>,
 }
 
 #[derive(Deserialize, Default)]
@@ -283,10 +299,42 @@ fn build(root: &Path, raw: RawConfig, path: PathBuf) -> Result<Config> {
             a.skills_mode = v;
         }
     }
+    let mut workspaces = Vec::new();
+    for (key, value) in raw.workspaces {
+        let listed = match value {
+            toml::Value::String(s) => Some(vec![s]),
+            toml::Value::Array(a) => a
+                .into_iter()
+                .map(|v| v.as_str().map(str::to_string))
+                .collect(),
+            _ => None,
+        };
+        let Some(listed) = listed else {
+            bail!(
+                "`{key}` under `[workspaces]` in `{}` is not a project's path or a list of them",
+                tilde(&path)
+            );
+        };
+        // Relative to what would depend on the folder `canon` was run in.
+        for value in std::iter::once(&key).chain(&listed) {
+            if !value.starts_with('~') && !value.starts_with('/') {
+                bail!(
+                    "`{value}` under `[workspaces]` in `{}` is not a full path: start it with ~ or /",
+                    tilde(&path)
+                );
+            }
+        }
+        workspaces.push(Workspace {
+            root: expand(&key),
+            projects: listed.iter().map(|p| expand(p)).collect(),
+            key,
+        });
+    }
     Ok(Config {
         source,
         agents,
         projects: raw.projects.iter().map(|p| expand(p)).collect(),
+        workspaces,
         path,
         shortcut: source_dir(),
         claude_state: claude_state(),
@@ -491,7 +539,25 @@ pub fn set_key(path: &Path, key: &str, literal: &str, dry_run: bool) -> Result<S
             lines.push(format!("[{section}]"));
             lines.push(line.clone());
         }
-        (None, None, None) => lines.push(line.clone()),
+        // A key above every table, since below one it would belong to it, and
+        // the notes right above that table stay with it.
+        (None, None, None) => {
+            let table = lines
+                .iter()
+                .position(|l| l.trim_start().starts_with('['))
+                .unwrap_or(lines.len());
+            let mut at = table;
+            while at > 0 && lines[at - 1].trim_start().starts_with('#') {
+                at -= 1;
+            }
+            while at > 0 && lines[at - 1].trim().is_empty() {
+                at -= 1;
+            }
+            lines.insert(at, line.clone());
+            if lines.get(at + 1).is_some_and(|l| !l.trim().is_empty()) {
+                lines.insert(at + 1, String::new());
+            }
+        }
     }
 
     if dry_run {
@@ -505,10 +571,73 @@ pub fn set_key(path: &Path, key: &str, literal: &str, dry_run: bool) -> Result<S
     let root = path.parent().unwrap_or(Path::new("."));
     if let Err(e) = load_from(root) {
         fs::write(path, &text).with_context(|| format!("could not write `{}`", tilde(path)))?;
-        bail!("`{key} = {literal}` was not kept, since the config then reads: {e:#}");
+        bail!(
+            "`{key} = {literal}` was not kept, since the config then reads: {}",
+            crate::said(&e)
+        );
     }
     Ok(line)
 }
+
+/// Point workspace `key` at `projects` under `[workspaces]` (one path, or a
+/// list of several), or take it out with `None`, keeping every comment. The
+/// file is left as it was when the result would not load.
+pub fn set_workspace(path: &Path, key: &str, projects: Option<&[String]>) -> Result<()> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("could not read `{}`", tilde(path)))?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("`{}` is not valid", tilde(path)))?;
+    match projects {
+        Some(projects) => {
+            if doc.get("workspaces").is_none() {
+                let mut table = toml_edit::Table::new();
+                table.decor_mut().set_prefix(WORKSPACES_NOTE);
+                doc.insert("workspaces", toml_edit::Item::Table(table));
+            }
+            let Some(table) = doc["workspaces"].as_table_like_mut() else {
+                bail!("`workspaces` in `{}` is not a table", tilde(path));
+            };
+            let mut value = match projects {
+                [one] => toml_edit::Value::from(one.as_str()),
+                many => toml_edit::Value::Array(many.iter().map(String::as_str).collect()),
+            };
+            // A comment after the old value stays after the new one.
+            if let Some(old) = table.get(key).and_then(toml_edit::Item::as_value) {
+                *value.decor_mut() = old.decor().clone();
+            }
+            table.insert(key, toml_edit::Item::Value(value));
+        }
+        None => {
+            if let Some(table) = doc
+                .get_mut("workspaces")
+                .and_then(toml_edit::Item::as_table_like_mut)
+            {
+                table.remove(key);
+            }
+        }
+    }
+    fs::write(path, doc.to_string())
+        .with_context(|| format!("could not write `{}`", tilde(path)))?;
+    let root = path.parent().unwrap_or(Path::new("."));
+    if let Err(e) = load_from(root) {
+        fs::write(path, &text).with_context(|| format!("could not write `{}`", tilde(path)))?;
+        bail!(
+            "`{key}` was not changed, since the config then reads: {}",
+            crate::said(&e)
+        );
+    }
+    Ok(())
+}
+
+/// The comment above a `[workspaces]` table canonize starts in a config that
+/// has none, the same words `canon init` writes.
+const WORKSPACES_NOTE: &str = "
+# Folders you work in outside the repos of your projects (notes, replies, data,
+# a folder per issue), each pointed at the projects it is for, one path or a
+# list: an agent started anywhere under one is told about them and reads their
+# files. `canon link` adds one.
+";
 
 #[cfg(test)]
 mod tests {

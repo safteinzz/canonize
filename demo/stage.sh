@@ -2,7 +2,8 @@
 # A staged home for the README pictures: a canon that was just moved from
 # ~/dotfiles/development to ~/dotfiles/canon, a Claude whose CLAUDE.md still
 # imports the old path, a Codex with nothing wired yet, a few projects importing
-# conventions from the old folder, and skills in both places. Nothing here
+# conventions from the old folder, a folder to work on an issue from, and
+# skills in both places. Nothing here
 # touches your real home: every path, XDG variables included, is redirected
 # into ./home.
 #
@@ -53,6 +54,7 @@ write_canon() {
   cp "$TEMPLATES/rules.schema.json" "$c/rules.schema.json"
   printf '# rust.md\n\nHow the Rust crates are checked and shipped.\n' > "$c/conventions/rust.md"
   printf '# tui.md\n\nHow the terminal interfaces are built.\n' > "$c/conventions/tui.md"
+  printf '# support.md\n\nHow replies to customers are written.\n' > "$c/conventions/support.md"
   skill "$c/skills/code-review" "Review the current changes against the rules"
   skill "$c/skills/release" "Walk a crate through its release steps"
 }
@@ -81,6 +83,15 @@ write_projects() {
   done
 }
 
+# A folder to work on an issue from, outside the repos, with notes of its own
+# and nothing linked yet.
+write_workspace() {
+  local w="$STAGE/issues/shop"
+  mkdir -p "$w/1042-checkout-timeout"
+  printf '# shop\n\nPayments time out after 30s on the checkout page.\n' > "$w/CONTEXT.md"
+  env -i $(env_for_stage) git -C "$w" init -q
+}
+
 # Set up the way the wizard would, by running setup itself: a hand-written
 # copy of canonize.toml would show frames of a config the tool never writes.
 write_setup() {
@@ -95,6 +106,7 @@ up() {
   write_canon
   write_agents
   write_projects
+  write_workspace
   [ -z "${READY:-}" ] || write_setup
   # A shell rc that sources something out of the real home would error on it
   # here; an empty stand-in keeps the staged shell quiet.

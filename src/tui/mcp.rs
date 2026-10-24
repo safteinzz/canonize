@@ -79,7 +79,7 @@ impl App {
                 },
             );
         if let Err(e) = wrote {
-            form.error = Some(format!("{e:#}"));
+            form.error = Some(crate::said(&e));
             return;
         }
         let name = saved.name;
@@ -98,7 +98,8 @@ impl App {
                 .chain(
                     m.projects
                         .iter()
-                        .map(|p| &p[i])
+                        .chain(&m.spaces)
+                        .filter_map(|p| p.get(i))
                         .filter(|c| matches!(c.state, State::Broken(_)))
                         .filter_map(|c| c.change.clone()),
                 ),
@@ -124,18 +125,20 @@ impl App {
         }
     }
 
-    /// Deleting server `i` from the canon: out of every agent and project,
-    /// out of mcp.toml, and its kept token deleted, as one batch that stops at
-    /// the first failure, so the canon's copy and its token go only once no
-    /// agent still names them.
+    /// Deleting server `i` from the canon: out of every agent, project and
+    /// workspace, out of mcp.toml, and its kept token deleted, as one batch
+    /// that stops at the first failure, so the canon's copy and its token go
+    /// only once no agent still names them.
     fn delete_server(&self, i: usize) -> Option<Change> {
         let (m, cfg) = (self.mcps.as_ref()?, self.cfg.as_ref()?);
         let server = m.servers.get(i)?;
         let mut changes = plan::dedup(
-            m.cells[i]
-                .iter()
-                .filter_map(|c| c.undo.clone())
-                .chain(m.projects.iter().filter_map(|p| p[i].undo.clone())),
+            m.cells[i].iter().filter_map(|c| c.undo.clone()).chain(
+                m.projects
+                    .iter()
+                    .chain(&m.spaces)
+                    .filter_map(|p| p.get(i)?.undo.clone()),
+            ),
         );
         changes.push(Change::McpUndefine {
             file: cfg.source.mcp.clone(),

@@ -5,6 +5,7 @@
 mod alert;
 mod confirm;
 mod line_edit;
+mod link_form;
 mod mcp;
 mod render;
 mod scope;
@@ -12,6 +13,7 @@ mod server_form;
 mod typed;
 mod widgets;
 mod wizard;
+mod workspaces;
 
 use crate::check::{self, Report};
 use crate::config::{self, Config, tilde};
@@ -20,6 +22,7 @@ use crate::mcp::Mcps;
 use crate::plan::{self, Change, Plan, State};
 use crate::projects::{self, Projects};
 use crate::setup;
+use crate::workspaces::Workspaces;
 use alert::Note;
 use anyhow::Result;
 use confirm::{Action, Answer, Confirm};
@@ -28,6 +31,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use link_form::{LinkForm, Linked};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use scope::{Picked, Scope};
@@ -62,6 +66,7 @@ pub(super) enum View {
     Agents,
     Skills,
     Houses,
+    Workspaces,
     Mcp,
 }
 
@@ -79,6 +84,7 @@ pub(super) struct App {
     pub(super) projects: Option<Projects>,
     pub(super) houses: Option<Houses>,
     pub(super) mcps: Option<Mcps>,
+    pub(super) spaces: Option<Workspaces>,
     pub(super) view: View,
     /// The selected line of the agent's card in the agents tab.
     pub(super) aline: usize,
@@ -93,11 +99,20 @@ pub(super) struct App {
     /// The MCP tab's selection, over the same rows as the houses tab.
     pub(super) mrow: usize,
     pub(super) mcol: usize,
+    /// The workspaces tab's row, an index into `space_rows`.
+    pub(super) wrow: usize,
+    /// Whether the workspaces tab's keys go to the card (after Enter) or the list.
+    pub(super) in_space: bool,
+    /// The selected line of the workspace's card, an index into `space_lines`.
+    pub(super) sline: usize,
     /// The first row each grid shows, kept between frames so moving back up
     /// scrolls only once the selection reaches the top.
     pub(super) stop: Cell<usize>,
     pub(super) ptop: Cell<usize>,
     pub(super) mtop: Cell<usize>,
+    pub(super) wtop: Cell<usize>,
+    /// The first line of a workspace's card on screen.
+    pub(super) ctop: Cell<usize>,
     pub(super) report: Option<Report>,
     pub(super) col: usize,
     pub(super) confirm: Option<Confirm>,
@@ -109,6 +124,9 @@ pub(super) struct App {
     pub(super) wizard: Option<Wizard>,
     /// A new MCP server being described, from the MCP tab's `c`.
     pub(super) server_form: Option<ServerForm>,
+    /// A folder being linked to projects, from the workspaces tab's `c` or the
+    /// card's `a`.
+    pub(super) link_form: Option<LinkForm>,
     /// A box that is only read. It owns every key until closed.
     pub(super) note: Option<Note>,
     pub(super) show_help: bool,
@@ -138,6 +156,7 @@ impl App {
             projects: None,
             houses: None,
             mcps: None,
+            spaces: None,
             view: View::Agents,
             aline: 0,
             in_card: false,
@@ -149,6 +168,11 @@ impl App {
             mrow: 0,
             mcol: 0,
             mtop: Cell::new(0),
+            wrow: 0,
+            in_space: false,
+            sline: 0,
+            wtop: Cell::new(0),
+            ctop: Cell::new(0),
             report: None,
             col: 0,
             confirm: None,
@@ -156,6 +180,7 @@ impl App {
             scope: None,
             wizard: None,
             server_form: None,
+            link_form: None,
             note: None,
             show_help: false,
             help_scroll: Cell::new(0),
@@ -188,6 +213,7 @@ impl App {
                 self.plan = Some(Plan::build(&cfg));
                 let projects = Projects::build(&cfg);
                 self.mcps = Some(Mcps::build(&cfg, &projects));
+                self.spaces = Some(Workspaces::build(&cfg, &projects));
                 self.projects = Some(projects);
                 self.houses = Some(Houses::build(&cfg));
                 self.report = Some(check::run(&cfg.source));
@@ -200,8 +226,9 @@ impl App {
                 self.projects = None;
                 self.houses = None;
                 self.mcps = None;
+                self.spaces = None;
                 self.report = None;
-                self.load_error = Some(format!("{e:#}"));
+                self.load_error = Some(crate::said(&e));
             }
         }
         let (_, cols) = self.size();
@@ -222,6 +249,9 @@ impl App {
         if let Some(m) = &self.mcps {
             self.mcol = self.mcol.min(m.servers.len().saturating_sub(1));
         }
+        self.wrow = self.wrow.min(self.space_rows().len().saturating_sub(1));
+        self.in_space &= self.space().is_some();
+        self.sline = self.sline.min(self.space_lines().len().saturating_sub(1));
     }
 
     /// Rows and columns (agents) on screen.
@@ -255,6 +285,7 @@ impl App {
             || self.wizard.is_some()
             || self.note.is_some()
             || self.server_form.is_some()
+            || self.link_form.is_some()
             || self.confirm.is_some()
             || self.typed.is_some()
             || self.scope.is_some()
@@ -307,6 +338,17 @@ impl App {
             }
             return None;
         }
+        if let Some(form) = &mut self.link_form {
+            match form.key(key) {
+                Linked::Pending => {}
+                Linked::Cancelled => {
+                    self.link_form = None;
+                    self.set_status("cancelled");
+                }
+                Linked::Done(workspace, project) => self.save_link(workspace, project),
+            }
+            return None;
+        }
         if let Some(c) = &mut self.confirm {
             match c.key(key) {
                 Answer::Pending => {}
@@ -356,10 +398,17 @@ impl App {
 
         use KeyCode::*;
         if matches!(key.code, Tab | BackTab) {
-            const VIEWS: [View; 4] = [View::Agents, View::Skills, View::Houses, View::Mcp];
+            const VIEWS: [View; 5] = [
+                View::Agents,
+                View::Skills,
+                View::Houses,
+                View::Workspaces,
+                View::Mcp,
+            ];
             let i = VIEWS.iter().position(|v| *v == self.view).unwrap_or(0);
             let step = if key.code == Tab { 1 } else { VIEWS.len() - 1 };
             self.in_card = false;
+            self.in_space = false;
             self.view = VIEWS[(i + step) % VIEWS.len()];
             // A filter belongs to the list it was typed over; carried into the
             // next tab it would hide rows nobody searched for.
@@ -367,8 +416,10 @@ impl App {
             self.query_back = 0;
             return None;
         }
-        // The agents list filters, the card opened from it does not.
-        let listing = self.load_error.is_none() && !(self.view == View::Agents && self.in_card);
+        // The lists filter, the cards opened from them do not.
+        let listing = self.load_error.is_none()
+            && !(self.view == View::Agents && self.in_card)
+            && !(self.view == View::Workspaces && self.in_space);
         if listing && key.code == Char('/') {
             self.query.clear();
             self.query_back = 0;
@@ -385,6 +436,11 @@ impl App {
         }
         if self.view == View::Mcp
             && let Some(edit) = self.mcp_key(key)
+        {
+            return edit;
+        }
+        if self.view == View::Workspaces
+            && let Some(edit) = self.space_key(key)
         {
             return edit;
         }
@@ -469,7 +525,7 @@ impl App {
             }
         }
         // Keys only the agents tab has must not reach it from the houses tab.
-        if matches!(self.view, View::Houses | View::Mcp)
+        if matches!(self.view, View::Houses | View::Workspaces | View::Mcp)
             && matches!(key.code, Char('f' | 'd') | Enter)
         {
             return None;
@@ -641,10 +697,24 @@ impl App {
                     "every broken convention import and CANON.md wiring",
                 )
             }
+            View::Workspaces => {
+                let mut c = self
+                    .spaces
+                    .as_ref()
+                    .map(|s| s.fixes(None))
+                    .unwrap_or_default();
+                if let Some(m) = &self.mcps {
+                    c.extend((0..m.spaces.len()).flat_map(|i| m.space_fixes(i)));
+                }
+                (
+                    plan::dedup(c.into_iter()),
+                    "every workspace's files, conventions and MCP servers",
+                )
+            }
             View::Mcp => (
                 self.mcps
                     .as_ref()
-                    .map(|m| m.fixes(None))
+                    .map(|m| m.tab_fixes())
                     .unwrap_or_default(),
                 "every MCP server that differs from your canon",
             ),
@@ -693,29 +763,46 @@ impl App {
             .unwrap_or_default();
         let name = projects::short(cfg, &x.root);
         let to = if remove { "from" } else { "to" };
-        // Adding to a project brings its CANON.md wiring along.
-        let wired = |y: &projects::Project, changes: Vec<Change>| {
-            let mut out = changes;
-            if !remove && !out.is_empty() {
-                out.extend(y.wiring_changes());
+        // Adding to a project brings its CANON.md wiring along, and either way
+        // its workspaces are rewritten, once each, to list what it then imports.
+        let wired = |ys: Vec<(&projects::Project, Vec<usize>)>| {
+            let mut out = Vec::new();
+            let mut edits = Vec::new();
+            for (y, cols) in ys {
+                let mine: Vec<Change> = cols.iter().filter_map(|&c| pick(&y.cells[c])).collect();
+                if mine.is_empty() {
+                    continue;
+                }
+                out.extend(mine);
+                if remove {
+                    edits.push((y, Vec::new(), cols));
+                } else {
+                    out.extend(y.wiring_changes());
+                    edits.push((y, cols, Vec::new()));
+                }
             }
+            out.extend(crate::workspaces::refresh(cfg, p, &edits));
             out
         };
+        let picked = |y: &projects::Project, cols: Vec<usize>| -> Vec<usize> {
+            cols.into_iter()
+                .filter(|&c| pick(&y.cells[c]).is_some())
+                .collect()
+        };
+        let every: Vec<usize> = (0..x.cells.len()).collect();
         let mut items = vec![
             (
                 format!("{file} {to} {name}"),
-                plan::dedup(wired(x, pick(&x.cells[self.pcol]).into_iter().collect()).into_iter()),
+                plan::dedup(wired(vec![(x, vec![self.pcol])]).into_iter()),
             ),
             (
                 format!("every convention {to} {name}"),
-                plan::dedup(wired(x, x.cells.iter().filter_map(pick).collect()).into_iter()),
+                plan::dedup(wired(vec![(x, picked(x, every))]).into_iter()),
             ),
             (
                 format!("{file} {to} every project"),
                 plan::dedup(
-                    p.list
-                        .iter()
-                        .flat_map(|y| wired(y, pick(&y.cells[self.pcol]).into_iter().collect())),
+                    wired(p.list.iter().map(|y| (y, vec![self.pcol])).collect()).into_iter(),
                 ),
             ),
         ];
@@ -752,7 +839,7 @@ impl App {
             self.typed = Some(Typed {
                 title: "delete server".into(),
                 message: format!(
-                    "Delete {name} from your canon? It comes out of every agent and project that has it, and out of mcp.toml.{token}"
+                    "Delete {name} from your canon? It comes out of every agent, project and workspace that has it, and out of mcp.toml.{token}"
                 ),
                 name: name.to_string(),
                 input: String::new(),
@@ -1170,6 +1257,26 @@ impl App {
             .collect()
     }
 
+    /// The name a workspace row goes by, which is what `/` matches: its
+    /// folder, then its projects.
+    pub(super) fn space_name(&self, i: usize) -> String {
+        match (&self.cfg, &self.spaces) {
+            (Some(c), Some(s)) => {
+                let e = &s.list[i];
+                let names: Vec<String> = e.projects.iter().map(|p| projects::short(c, p)).collect();
+                format!("{} {}", tilde(&e.root), names.join(" "))
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// The workspaces tab's rows, as indexes into `Workspaces::list`; `wrow`
+    /// indexes this.
+    pub(super) fn space_rows(&self) -> Vec<usize> {
+        let n = self.spaces.as_ref().map_or(0, |s| s.list.len());
+        (0..n).filter(|&i| self.kept(&self.space_name(i))).collect()
+    }
+
     /// Rows in the houses tab: every agent, then every project.
     pub(super) fn house_rows(&self) -> usize {
         self.place_rows().len()
@@ -1181,6 +1288,7 @@ impl App {
             View::Agents => self.agent_rows().len(),
             View::Skills => self.skill_list().len(),
             View::Houses | View::Mcp => self.house_rows(),
+            View::Workspaces => self.space_rows().len(),
         }
     }
 
@@ -1197,6 +1305,7 @@ impl App {
         let places = self.house_rows().saturating_sub(1);
         self.prow = self.prow.min(places);
         self.mrow = self.mrow.min(places);
+        self.wrow = self.wrow.min(self.space_rows().len().saturating_sub(1));
     }
 
     /// A key while `/` is being typed: every letter goes into the query and the
@@ -1230,6 +1339,7 @@ impl App {
                     }
                     View::Skills => self.srow = step(self.srow),
                     View::Houses => self.prow = step(self.prow),
+                    View::Workspaces => self.wrow = step(self.wrow),
                     View::Mcp => self.mrow = step(self.mrow),
                 }
                 return;
@@ -1310,11 +1420,19 @@ impl App {
             });
             return;
         };
-        // Adding brings what makes the agents read CANON.md, the first time.
+        // Adding brings what makes the agents read CANON.md, the first time,
+        // and either way the project's workspaces list what it then imports.
         let mut changes = vec![change.clone()];
         if fix {
             changes.extend(project.wiring_changes());
         }
+        let col = vec![self.pcol];
+        let edit = if fix {
+            (project, col, Vec::new())
+        } else {
+            (project, Vec::new(), col)
+        };
+        changes.extend(crate::workspaces::refresh(cfg, p, &[edit]));
         let runs = Self::runs(&changes);
         self.confirm = Some(
             if fix {
@@ -1405,7 +1523,7 @@ impl App {
                     self.reload();
                     self.set_status(format!("set up in {}", tilde(&choice.root)));
                 }
-                Err(e) => self.note = Some(Note::alert("set up failed", format!("{e:#}"))),
+                Err(e) => self.note = Some(Note::alert("set up failed", crate::said(&e))),
             },
         }
     }
@@ -1414,8 +1532,15 @@ impl App {
         let mut failed = Vec::new();
         let total = changes.len();
         for c in changes {
+            if !failed.is_empty() && c.after_all() {
+                failed.push(format!(
+                    "{}: not done, since a step before it failed",
+                    c.describe()
+                ));
+                continue;
+            }
             if let Err(e) = c.run() {
-                failed.push(format!("{}: {e:#}", c.describe()));
+                failed.push(format!("{}: {}", c.describe(), crate::said(&e)));
             }
         }
         self.reload();
@@ -1485,7 +1610,11 @@ fn event_loop(terminal: &mut Term, app: &mut App) -> Result<()> {
             let editor = std::env::var("VISUAL")
                 .or_else(|_| std::env::var("EDITOR"))
                 .unwrap_or_else(|_| "vi".to_string());
+            let before = std::fs::read(&path).ok();
             match run_suspended(terminal, &editor, &path)? {
+                // A reload reads every project again, which takes a second on
+                // a WSL drive, and a file left as it was changes nothing.
+                Some(_) if std::fs::read(&path).ok() == before => {}
                 Some(_) => {
                     app.reload();
                     app.set_status(format!("reloaded after editing {}", tilde(&path)));
@@ -1589,7 +1718,7 @@ fn undefined_server(changes: &[Change]) -> Option<(&str, Option<&PathBuf>)> {
 }
 
 /// A gate's title, naming what it is in front of by the first change it runs.
-fn gate_title(changes: &[Change]) -> String {
+pub(super) fn gate_title(changes: &[Change]) -> String {
     let many = changes.len() > 1;
     let noun = |one: &str, more: &str| format!("delete {}", if many { more } else { one });
     match changes.first() {

@@ -11,15 +11,18 @@ use ratatui::widgets::{
 use super::alert::render_note;
 use super::confirm::render_confirm;
 use super::line_edit;
+use super::link_form::render_link_form;
 use super::scope::render_scope;
 use super::server_form::render_server_form;
 use super::typed::render_typed;
 use super::widgets::*;
 use super::wizard::render_wizard;
+use super::workspaces::SpaceLine;
 use super::{App, HouseRow, View};
 use crate::config::{RulesMode, SkillsMode, tilde};
 use crate::plan::{self, State};
 use crate::projects;
+use crate::workspaces::Reach;
 
 const ADD: &str = "a add";
 const OPEN: &str = "o open";
@@ -28,6 +31,7 @@ const ON_OFF: &str = "↵ on/off";
 const AGENT_KEYS: &[&str] = &["↵ open", FIX_ALL, FIND, REFRESH, QUIT];
 const CARD_KEYS: &[&str] = &["↵ fix", FIX_ALL, DEL, BACK, REFRESH, QUIT];
 const SKILL_KEYS: &[&str] = &[ON_OFF, ADD, FIX_ALL, DEL, FIND, REFRESH, QUIT];
+const SPACE_KEYS: &[&str] = &["↵ open", "f fix", FIX_ALL, CREATE, DEL, FIND, REFRESH, QUIT];
 const UNSET_KEYS: &[&str] = &["s set up", QUIT];
 
 pub(super) fn ui(f: &mut Frame, app: &App) {
@@ -75,6 +79,7 @@ pub(super) fn ui(f: &mut Frame, app: &App) {
         None if app.view == View::Skills => render_skills(f, chunks[1], app),
         None if app.view == View::Houses => render_houses(f, chunks[1], app),
         None if app.view == View::Mcp => render_mcp(f, chunks[1], app),
+        None if app.view == View::Workspaces => render_workspaces(f, chunks[1], app),
         None => render_agents(f, chunks[1], app),
     }
     render_status(f, chunks[3], app);
@@ -87,6 +92,9 @@ pub(super) fn ui(f: &mut Frame, app: &App) {
     }
     if let (Some(form), Some(cfg)) = (&app.server_form, &app.cfg) {
         render_server_form(f, area, form, &tilde(&cfg.source.mcp));
+    }
+    if let Some(form) = &app.link_form {
+        render_link_form(f, area, form);
     }
     if let Some(c) = &app.confirm {
         render_confirm(f, area, c);
@@ -129,21 +137,28 @@ fn render_source(f: &mut Frame, area: Rect, app: &App) {
         .title(" canonize · canon ");
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let cols = Layout::horizontal([Constraint::Length(42), Constraint::Min(0)]).split(inner);
+    let cols = Layout::horizontal([Constraint::Length(55), Constraint::Min(0)]).split(inner);
     let idx = match app.view {
         View::Agents => 0,
         View::Skills => 1,
         View::Houses => 2,
-        View::Mcp => 3,
+        View::Workspaces => 3,
+        View::Mcp => 4,
     };
-    let tabs = Tabs::new(vec!["Agents", "Skills", "Conventions", "MCPs"])
-        .select(idx)
-        .divider("│")
-        .highlight_style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
+    let tabs = Tabs::new(vec![
+        "Agents",
+        "Skills",
+        "Conventions",
+        "Workspaces",
+        "MCPs",
+    ])
+    .select(idx)
+    .divider("│")
+    .highlight_style(
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
     f.render_widget(tabs, cols[0]);
     f.render_widget(
         Paragraph::new(Line::from(spans)).alignment(Alignment::Right),
@@ -452,6 +467,22 @@ fn detail_pane(app: &App, width: u16) -> Option<(Pane, u16)> {
             .collect();
         return Some((pane(app.house_row()?, app.pcol)?, tallest(all)));
     }
+    if app.view == View::Workspaces {
+        let n = app.spaces.as_ref()?.list.len();
+        let mut all: Vec<Pane> = (0..n).filter_map(|i| space_detail(app, i)).collect();
+        all.extend((0..n).flat_map(|i| {
+            app.space_lines_of(i)
+                .into_iter()
+                .filter_map(move |l| line_detail(app, i, l))
+        }));
+        let i = app.space()?;
+        let pane = if app.in_space {
+            line_detail(app, i, app.space_line()?)?
+        } else {
+            space_detail(app, i)?
+        };
+        return Some((pane, tallest(all)));
+    }
     if app.view == View::Mcp {
         let cols = app.mcps.as_ref()?.servers.len();
         let all = app
@@ -674,6 +705,23 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             _ => None,
         };
         with_open(file, &[CREATE, EDIT])
+    } else if app.view == View::Workspaces && app.in_space {
+        // Enter does what the line under the cursor does: on a project it
+        // only says which keys act there.
+        let mut keys = match app.space_line() {
+            Some(SpaceLine::File(_)) => vec!["↵ fix"],
+            Some(SpaceLine::Context) => vec!["↵ open"],
+            Some(SpaceLine::Convention(_) | SpaceLine::Server(_)) => vec![ON_OFF],
+            Some(SpaceLine::Project(_)) | None => Vec::new(),
+        };
+        keys.push(ADD);
+        if app.space_file_at().is_some() && app.space_line() != Some(SpaceLine::Context) {
+            keys.push(OPEN);
+        }
+        keys.extend([FIX_ALL, DEL, BACK, REFRESH, QUIT]);
+        keys
+    } else if app.view == View::Workspaces {
+        SPACE_KEYS.to_vec()
     } else if app.view == View::Skills {
         SKILL_KEYS.to_vec()
     } else if app.in_card {
@@ -683,7 +731,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     };
     // A committed filter stays in front of the keys: rows are hidden, and
     // nothing else on screen would say why.
-    let lead = match app.query.is_empty() || app.in_card {
+    let lead = match app.query.is_empty() || app.in_card || app.in_space {
         true => Vec::new(),
         false => vec![format!("/{}", app.query), BACK.to_string()],
     };
@@ -752,6 +800,28 @@ const HELP: &[HelpSection] = &[
         ],
     ),
     (
+        "workspaces",
+        &[
+            ("↵", "open the workspace's card"),
+            ("f", "fix its files, conventions and MCP servers"),
+            ("c", "link a folder to a project"),
+            ("d", "unlink it"),
+            ("F", "fix all"),
+            ("ctrl-o", "pick the project, in the form"),
+        ],
+    ),
+    (
+        "in a workspace's card",
+        &[
+            ("↵", "on/off, fix a file, open CONTEXT.md"),
+            ("f", "fix or add the line"),
+            ("a", "add a project"),
+            ("o", "open the line's file"),
+            ("d", "delete it, or drop the project"),
+            ("esc", "back to the list"),
+        ],
+    ),
+    (
         "mcps",
         &[
             ("↵", "on/off"),
@@ -772,6 +842,11 @@ const HELP: &[HelpSection] = &[
             ("", "own: ↵ adopts it"),
             ("", "foreign: yours, left alone"),
             ("", "n/a off -: nothing"),
+            ("", "there: your CONTEXT.md, which canonize never writes"),
+            (
+                "",
+                "via: every agent already gets it, from a project or everywhere",
+            ),
             (
                 "",
                 "unapproved: imported, but Claude may not load it there yet",
@@ -991,6 +1066,549 @@ fn render_mcp(f: &mut Frame, area: Rect, app: &App) {
     render_places(f, area, app, grid, states);
 }
 
+/// The workspaces tab: a list of folders linked to projects, and the card of
+/// the selected one, a line per file canonize writes there, project, its
+/// CONTEXT.md, convention and MCP server.
+fn render_workspaces(f: &mut Frame, area: Rect, app: &App) {
+    let (Some(s), Some(m)) = (&app.spaces, &app.mcps) else {
+        return;
+    };
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    if s.list.is_empty() {
+        let para = Paragraph::new(
+            "No workspaces yet: c links a folder you work in outside your projects' repos, a folder per issue under it say, to the projects it is for, and an agent started anywhere under it then reads their files.",
+        )
+        .style(dim)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" workspaces "),
+        )
+        .wrap(Wrap { trim: false });
+        f.render_widget(para, area);
+        return;
+    }
+    // Sized from every row, so typing a filter never resizes the list.
+    let list_w = s
+        .list
+        .iter()
+        .map(|e| tilde(&e.root).chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(16, 40) as u16
+        + 6;
+    let cols = Layout::horizontal([Constraint::Length(list_w), Constraint::Min(0)]).split(area);
+    let shown = app.space_rows();
+    let items: Vec<Line> = shown
+        .iter()
+        .enumerate()
+        .map(|(n, &i)| {
+            let e = &s.list[i];
+            let drifted =
+                !e.gone.is_empty() || !e.fixes(None).is_empty() || !m.space_fixes(i).is_empty();
+            let (dot, colour) = if !e.here {
+                ("○", Color::DarkGray)
+            } else if drifted {
+                ("●", Color::Yellow)
+            } else {
+                ("●", Color::Green)
+            };
+            let mut style = if e.here { Style::default() } else { dim };
+            if n == app.wrow {
+                // Reversed while the list has the keys, underlined once the card does.
+                style = style.add_modifier(if app.in_space {
+                    Modifier::UNDERLINED
+                } else {
+                    Modifier::REVERSED
+                });
+            }
+            Line::from(vec![
+                Span::styled(format!(" {dot} "), Style::default().fg(colour)),
+                Span::styled(tilde(&e.root), style),
+            ])
+        })
+        .collect();
+    render_scrolled(
+        f,
+        cols[0],
+        items,
+        focused(!app.in_space, " workspaces "),
+        app.wrow,
+        &app.wtop,
+    );
+
+    let Some(i) = app.space() else {
+        return;
+    };
+    let rows: Vec<SpaceRow> = app
+        .space_lines_of(i)
+        .into_iter()
+        .filter_map(|l| space_row(app, i, l))
+        .collect();
+    let name_w = rows
+        .iter()
+        .map(|r| r.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(10);
+    let mut last = "";
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(n, r)| {
+            let mut style = r.style;
+            if app.in_space && n == app.sline {
+                style = style.add_modifier(Modifier::REVERSED);
+            }
+            let group = if r.group == last { "" } else { r.group };
+            last = r.group;
+            Line::from(vec![
+                Span::styled(format!("{group:<13}"), dim),
+                Span::styled(
+                    format!("{:<name_w$}", r.name),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  {:<9}", r.word), style),
+                Span::styled(format!("  {}", r.note), dim),
+            ])
+        })
+        .collect();
+    let title = format!(" {} ", tilde(&s.list[i].root));
+    render_scrolled(
+        f,
+        cols[1],
+        lines,
+        focused(app.in_space, &title),
+        app.sline,
+        &app.ctop,
+    );
+}
+
+/// `lines` in a frame, scrolled so line `at` is on screen, starting from `top`
+/// and writing back where it ended up, with a scrollbar once they do not fit.
+fn render_scrolled(
+    f: &mut Frame,
+    area: Rect,
+    lines: Vec<Line>,
+    block: Block,
+    at: usize,
+    top: &Kept<usize>,
+) {
+    let shown = area.height.saturating_sub(2) as usize;
+    let mut first = top.get().min(at);
+    if shown > 0 && at >= first + shown {
+        first = at + 1 - shown;
+    }
+    first = first.min(lines.len().saturating_sub(shown.max(1)));
+    top.set(first);
+    let total = lines.len();
+    f.render_widget(
+        Paragraph::new(lines.into_iter().skip(first).collect::<Vec<_>>()).block(block),
+        area,
+    );
+    if total > shown {
+        vscrollbar(f, area, total, first, shown);
+    }
+}
+
+/// One line of a workspace's card as the card shows it.
+struct SpaceRow {
+    /// The heading of the lines it is grouped with, shown on the first.
+    group: &'static str,
+    name: String,
+    word: String,
+    style: Style,
+    note: String,
+}
+
+fn space_row(app: &App, i: usize, line: SpaceLine) -> Option<SpaceRow> {
+    let (cfg, s, p, m) = (
+        app.cfg.as_ref()?,
+        app.spaces.as_ref()?,
+        app.projects.as_ref()?,
+        app.mcps.as_ref()?,
+    );
+    let e = s.list.get(i)?;
+    let green = Style::default().fg(Color::Green);
+    Some(match line {
+        SpaceLine::File(a) => {
+            let c = &e.cells[a];
+            SpaceRow {
+                group: "workspace",
+                name: super::workspaces::file_name(&c.at),
+                word: c.state.word().to_string(),
+                style: state_style(&c.state),
+                note: format!("read by {}", readers(app, e, &c.at).join(", ")),
+            }
+        }
+        SpaceLine::Project(k) => {
+            let root = e.projects.get(k)?;
+            let gone = e.gone.contains(root);
+            SpaceRow {
+                group: "workspace",
+                name: projects::short(cfg, root),
+                word: if gone { "broken" } else { "linked" }.to_string(),
+                style: if gone {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    green
+                },
+                note: if gone {
+                    format!("{} is not there", tilde(root))
+                } else {
+                    tilde(root)
+                },
+            }
+        }
+        SpaceLine::Context => SpaceRow {
+            group: "workspace",
+            name: crate::workspaces::CONTEXT_FILE.to_string(),
+            word: if e.context { "there" } else { "-" }.to_string(),
+            style: if e.context {
+                green
+            } else {
+                Style::default().add_modifier(Modifier::DIM)
+            },
+            note: if e.context {
+                "yours: o opens it".to_string()
+            } else {
+                "yours, not written yet: o starts it".to_string()
+            },
+        },
+        SpaceLine::Convention(c) => {
+            let cell = e.own.cells.get(c)?;
+            let (word, style) = look(house_word, &cell.state);
+            let reach = app.convention_reach(e, c);
+            let covered = reach.as_ref().is_some_and(Reach::covered);
+            let unread = e.unread().filter(|_| cell.state == State::Linked);
+            let (word, style, note) =
+                match (&cell.state, reach.and_then(|r| r.note(("reads", "read")))) {
+                    _ if unread.is_some() => {
+                        let (st, why) = unread?;
+                        (st.word(), state_style(st), why)
+                    }
+                    (State::Missing, Some(from)) if covered => ("via", green, from),
+                    (State::Missing | State::Linked, Some(from)) => (word, style, from),
+                    _ => (
+                        word,
+                        style,
+                        cell.state.why().unwrap_or_default().to_string(),
+                    ),
+                };
+            SpaceRow {
+                group: "conventions",
+                name: crate::cli::house_label(p.house.get(c)?),
+                word: word.to_string(),
+                style,
+                note,
+            }
+        }
+        SpaceLine::Server(k) => {
+            let server = m.servers.get(k)?;
+            let (word, style, note) = match m.spaces.get(i).and_then(|r| r.get(k)) {
+                Some(c) => {
+                    let (word, style) = look(crate::cli::mcp_word, &c.state);
+                    let reach = app.server_reach(k);
+                    let covered = reach.as_ref().is_some_and(Reach::covered);
+                    match (&c.state, reach.and_then(|r| r.note(("has", "have")))) {
+                        (State::Missing, Some(from)) if covered => ("via", green, from),
+                        (State::Missing | State::Linked, Some(from)) => (word, style, from),
+                        _ => (word, style, c.state.why().unwrap_or_default().to_string()),
+                    }
+                }
+                None => (
+                    "-",
+                    Style::default().add_modifier(Modifier::DIM),
+                    String::new(),
+                ),
+            };
+            SpaceRow {
+                group: "mcp servers",
+                name: server.name.clone(),
+                word: word.to_string(),
+                style,
+                note,
+            }
+        }
+    })
+}
+
+/// The active agents that read the file at `at` in workspace `e`.
+fn readers<'a>(app: &'a App, e: &crate::workspaces::Entry, at: &std::path::Path) -> Vec<&'a str> {
+    let Some(cfg) = &app.cfg else {
+        return Vec::new();
+    };
+    app.grid_agents()
+        .into_iter()
+        .filter(|&a| e.cells[a].at == at)
+        .map(|a| cfg.agents[a].name.as_str())
+        .collect()
+}
+
+/// Workspace `i` spelled out, while its row in the list is selected: where it
+/// is, whether git makes every agent reach its top, and what each key would do.
+fn space_detail(app: &App, i: usize) -> Option<Pane> {
+    let (cfg, s, m) = (app.cfg.as_ref()?, app.spaces.as_ref()?, app.mcps.as_ref()?);
+    let e = s.list.get(i)?;
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let field =
+        |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<17}"), dim), Span::raw(v)]);
+    let mut lines = vec![field(
+        "folder",
+        if e.here {
+            tilde(&e.root)
+        } else {
+            format!("{}, not on this machine", tilde(&e.root))
+        },
+    )];
+    let names: Vec<String> = e.projects.iter().map(|x| projects::short(cfg, x)).collect();
+    lines.push(field("projects", names.join(", ")));
+    if e.here {
+        // What a folder under it misses, said only of an agent here and of
+        // servers it has, as `status` says it.
+        let active = |name: &str| {
+            app.grid_agents()
+                .iter()
+                .any(|&a| cfg.agents[a].name == name)
+        };
+        let servers = m.spaces.get(i).is_some_and(|r| {
+            r.iter()
+                .any(|c| matches!(c.state, State::Linked | State::Broken(_)))
+        });
+        let shared = m.spaces_shared.get(i) == Some(&true);
+        let mut misses = Vec::new();
+        if active("codex") {
+            misses.push("codex never reads its AGENTS.md");
+        }
+        if active("claude") && servers && !shared {
+            misses.push("claude gets none of its MCP servers");
+        }
+        lines.push(field(
+            "git",
+            if e.git {
+                "yes, so every agent reads its top from a folder under it".to_string()
+            } else if misses.is_empty() {
+                "no".to_string()
+            } else {
+                format!("no: from a folder under it, {}", misses.join(", and "))
+            },
+        ));
+    }
+    lines.push(field(
+        "↵ open",
+        "its card: files, CONTEXT.md, projects, conventions, MCP servers".to_string(),
+    ));
+    let fixes = plan::dedup(e.fixes(None).into_iter().chain(m.space_fixes(i)));
+    if fixes.is_empty() {
+        lines.push(field("f", "nothing to fix".to_string()));
+    }
+    for (n, c) in fixes.iter().enumerate() {
+        lines.push(field(if n == 0 { "f" } else { "" }, c.describe()));
+    }
+    lines.push(field(
+        "d unlink",
+        "delete what canonize made there and forget it".to_string(),
+    ));
+    Some(Pane {
+        title: format!(" {} ", tilde(&e.root)),
+        lines,
+    })
+}
+
+/// Line `line` of workspace `i`'s card spelled out, while the card has the keys.
+fn line_detail(app: &App, i: usize, line: SpaceLine) -> Option<Pane> {
+    let (cfg, s, p, m) = (
+        app.cfg.as_ref()?,
+        app.spaces.as_ref()?,
+        app.projects.as_ref()?,
+        app.mcps.as_ref()?,
+    );
+    let e = s.list.get(i)?;
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let field =
+        |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<17}"), dim), Span::raw(v)]);
+    let state = |word: String, st: &State| {
+        Line::from(vec![
+            Span::styled(format!("{:<17}", "state"), dim),
+            Span::styled(
+                match st.why() {
+                    Some(why) => format!("{word}: {why}"),
+                    None => word,
+                },
+                state_style(st),
+            ),
+        ])
+    };
+    // What Enter does here, named by its verb as in the other tabs.
+    let toggle = |st: &State, change: &Option<plan::Change>, undo: &Option<plan::Change>| {
+        let c = if *st == State::Linked { undo } else { change };
+        match c {
+            Some(c) => field(&format!("↵ {}", c.verb()), c.describe()),
+            None => field("↵", "nothing to do".to_string()),
+        }
+    };
+    let root = tilde(&e.root);
+    let (what, lines) = match line {
+        SpaceLine::File(a) => {
+            let c = &e.cells[a];
+            let mut lines = vec![state(c.state.word().to_string(), &c.state)];
+            lines.push(field("at", tilde(&c.at)));
+            lines.push(field("read by", readers(app, e, &c.at).join(", ")));
+            match &c.change {
+                Some(ch) => lines.push(field(&format!("↵ f {}", ch.verb()), ch.describe())),
+                None => lines.push(field("↵ f", "nothing to fix".to_string())),
+            }
+            if let Some(u) = &c.undo {
+                lines.push(field(&format!("d {}", u.verb()), u.describe()));
+            }
+            (super::workspaces::file_name(&c.at), lines)
+        }
+        SpaceLine::Project(k) => {
+            let at = e.projects.get(k)?;
+            let mut lines = vec![field(
+                "project",
+                if e.gone.contains(at) {
+                    format!("{}, not there", tilde(at))
+                } else {
+                    tilde(at)
+                },
+            )];
+            if let Some(x) = p.list.iter().find(|x| x.root == *at) {
+                lines.push(field("o opens", tilde(&x.host)));
+            }
+            lines.push(field("a", "add another project".to_string()));
+            lines.push(field(
+                "d",
+                if e.projects.len() == 1 {
+                    "unlink the workspace, since it is its only project".to_string()
+                } else {
+                    "drop it from this workspace".to_string()
+                },
+            ));
+            (projects::short(cfg, at), lines)
+        }
+        SpaceLine::Context => {
+            let file = e.root.join(crate::workspaces::CONTEXT_FILE);
+            let lines = vec![
+                field(
+                    "file",
+                    if e.context {
+                        tilde(&file)
+                    } else {
+                        format!("{}, not written yet", tilde(&file))
+                    },
+                ),
+                field("↵ o", "open it in $EDITOR".to_string()),
+                Line::styled(
+                    "Your notes for this workspace: every agent there reads it first, and adds to it when told to remember something. canonize never writes it.",
+                    dim,
+                ),
+            ];
+            (crate::workspaces::CONTEXT_FILE.to_string(), lines)
+        }
+        SpaceLine::Convention(c) => {
+            let cell = e.own.cells.get(c)?;
+            let h = p.house.get(c)?;
+            let reach = app.convention_reach(e, c);
+            let covered = reach.as_ref().is_some_and(Reach::covered);
+            let from = reach.and_then(|r| r.note(("reads", "read")));
+            let lines = match from {
+                Some(from) if cell.state == State::Missing && covered => vec![
+                    state("via".to_string(), &State::Linked),
+                    field("file", tilde(h)),
+                    Line::styled(format!("Every agent here already reads it: {from}."), dim),
+                ],
+                from => {
+                    let word = match cell.state {
+                        State::Linked => "imported",
+                        State::Missing => "not imported",
+                        _ => cell.state.word(),
+                    };
+                    let mut lines = vec![
+                        state(word.to_string(), &cell.state),
+                        field("file", tilde(h)),
+                        field("in", tilde(&e.root.join(plan::CANON_FILE))),
+                        toggle(&cell.state, &cell.change, &cell.undo),
+                    ];
+                    if let Some(from) = from {
+                        lines.push(Line::styled(
+                            format!("From outside this workspace: {from}."),
+                            dim,
+                        ));
+                    }
+                    if let Some((_, why)) = e.unread().filter(|_| cell.state == State::Linked) {
+                        lines.push(Line::styled(format!("But {why}."), dim));
+                    }
+                    lines
+                }
+            };
+            (crate::cli::house_label(h), lines)
+        }
+        SpaceLine::Server(k) => {
+            let server = m.servers.get(k)?;
+            let mut lines = Vec::new();
+            match m.spaces.get(i).and_then(|r| r.get(k)) {
+                Some(c)
+                    if c.state == State::Missing
+                        && app.server_reach(k).is_some_and(|r| r.covered()) =>
+                {
+                    let from = app
+                        .server_reach(k)
+                        .and_then(|r| r.note(("has", "have")))
+                        .unwrap_or_default();
+                    lines.push(state("via".to_string(), &State::Linked));
+                    lines.push(field("server", server.summary()));
+                    lines.push(Line::styled(
+                        format!("Every agent here already has it: {from}."),
+                        dim,
+                    ));
+                }
+                Some(c) => {
+                    let word = match c.state {
+                        State::Missing => "not added".to_string(),
+                        State::Na => "no agent canonize knows can take it here".to_string(),
+                        _ => crate::cli::mcp_word(&c.state).to_string(),
+                    };
+                    lines.push(state(word, &c.state));
+                    lines.push(field("server", server.summary()));
+                    lines.push(field("at", format!("{root}, every agent")));
+                    lines.push(toggle(&c.state, &c.change, &c.undo));
+                    if let Some(from) = app.server_reach(k).and_then(|r| r.note(("has", "have"))) {
+                        lines.push(Line::styled(
+                            format!("From outside this workspace: {from}."),
+                            dim,
+                        ));
+                    }
+                    let claude = app
+                        .grid_agents()
+                        .iter()
+                        .any(|&a| cfg.agents[a].name == "claude");
+                    if m.spaces_shared.get(i) == Some(&true) {
+                        lines.push(Line::styled(
+                            "not for Claude: it keeps one list for the whole git repo this folder is in",
+                            dim,
+                        ));
+                    } else if claude && !e.git {
+                        lines.push(Line::styled(
+                            "Claude keeps MCP servers per folder outside a git repo, so only a session started at its top gets it",
+                            dim,
+                        ));
+                    }
+                }
+                None => {
+                    lines.push(field("server", server.summary()));
+                    lines.push(Line::styled(format!("{root} is not on this machine"), dim));
+                }
+            }
+            (server.name.clone(), lines)
+        }
+    };
+    Some(Pane {
+        title: format!(" {root} · {what} "),
+        lines,
+    })
+}
+
 /// A grid cell's word and style for `state`, a missing one dimmed.
 fn look(word: fn(&State) -> &'static str, state: &State) -> (&'static str, Style) {
     let style = if *state == State::Missing {
@@ -1085,7 +1703,7 @@ fn render_places(
         rows.push(section(if cfg.projects.is_empty() {
             "projects: none yet, add `projects = [\"~/dev\"]` to canonize.toml (E)"
         } else {
-            "projects: none under your project folders has a CLAUDE.md or AGENTS.md"
+            "projects: none under your project folders has a CLAUDE.md, AGENTS.md or other instructions file"
         }));
     }
     let total = rows.len();
@@ -1169,6 +1787,15 @@ fn project_detail(app: &App, prow: usize, pcol: usize) -> Option<Pane> {
         },
     )];
     lines.push(field("project", tilde(&x.root)));
+    let spaces: Vec<String> = cfg
+        .workspaces
+        .iter()
+        .filter(|w| w.projects.contains(&x.root))
+        .map(|w| tilde(&w.root))
+        .collect();
+    if !spaces.is_empty() {
+        lines.push(field("workspaces", spaces.join(", ")));
+    }
     // Named by its key, because the import itself lives in CANON.md and a row
     // saying `file` beside it reads as the file the import sits in.
     lines.push(field("o opens", tilde(&x.host)));

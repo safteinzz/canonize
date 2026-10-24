@@ -5,8 +5,9 @@
 # each item in quotes and separated by commas: ["~/dev", "~/work"]. A line
 # starting with # is a note and is ignored.
 
-# Folders to look through for projects (anything with a CLAUDE.md or
-# AGENTS.md, up to three levels down). [] looks nowhere.
+# Folders to look through for projects (anything with a CLAUDE.md,
+# .claude/CLAUDE.md, AGENTS.md, AGENTS.override.md, CLAUDE.local.md or
+# CANON.md, up to three levels down). [] looks nowhere.
 projects = {projects}
 
 [source]
@@ -23,6 +24,12 @@ conventions = "{house}"
 skills = "{skills}"
 # Your MCP servers, one table each (see `canon --help`). "" for none.
 mcp    = "mcp.toml"
+
+# Folders you work in outside the repos of your projects (notes, replies, data,
+# a folder per issue), each pointed at the projects it is for, one path or a
+# list: an agent started anywhere under one is told about them and reads their
+# files. `canon link` adds one.
+[workspaces]
 
 # Every agent canonize knows (claude, codex, pi, opencode) comes with its own
 # paths. To change one, remove the # in front of its lines and edit them:

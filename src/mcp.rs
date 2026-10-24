@@ -1122,13 +1122,7 @@ fn claude(project: Option<&Path>, args: &[&str]) -> Result<()> {
         std::io::ErrorKind::NotFound => anyhow::anyhow!(
             "`claude` is not on your PATH, so canonize cannot change Claude's MCP servers"
         ),
-        _ => anyhow::anyhow!(
-            "could not run `claude`: {}",
-            e.to_string()
-                .split(" (os error")
-                .next()
-                .unwrap_or("it failed")
-        ),
+        _ => anyhow::anyhow!("could not run `claude`: {}", crate::os_words(&e)),
     })?;
     if out.status.success() {
         return Ok(());
@@ -1261,6 +1255,11 @@ pub struct Mcps {
     /// Per project, whether Claude is left out of its cells, since it keeps
     /// one list for the whole git repo the project sits below the root of.
     pub shared: Vec<bool>,
+    /// Per workspace, in the order of `Config::workspaces`, its cell per
+    /// server: none for a folder not on this machine.
+    pub spaces: Vec<Vec<projects::Cell>>,
+    /// Per workspace, what `shared` is per project.
+    pub spaces_shared: Vec<bool>,
 }
 
 /// Where `agent` keeps a server: its global config, or with `project` (the
@@ -1483,11 +1482,77 @@ fn project_cell(
     }
 }
 
+/// Claude's local entries of the canon's servers filed under a folder in
+/// `from`, which follow it to `to`: taken out before the move, since `claude`
+/// finds them by the folder it runs in, and written under the new folder
+/// after. An entry whose folder is already gone cannot be taken out, and is
+/// named in the notes.
+pub fn moved_claude(
+    cfg: &Config,
+    from: &Path,
+    to: &Path,
+) -> (Vec<Change>, Vec<Change>, Vec<String>) {
+    let mut out = (Vec::new(), Vec::new(), Vec::new());
+    if !cfg.agents.iter().any(|a| a.name == "claude" && a.active()) {
+        return out;
+    }
+    let Ok(servers) = load(&cfg.source.mcp, &cfg.tokens) else {
+        return out;
+    };
+    let Some(doc) = fs::read_to_string(&cfg.claude_state)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return out;
+    };
+    let Some(folders) = doc.get("projects").and_then(Value::as_object) else {
+        return out;
+    };
+    let real = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let (from, to) = (real(from), to.to_path_buf());
+    for (key, entry) in folders {
+        let old = PathBuf::from(key);
+        let Ok(rest) = old.strip_prefix(&from) else {
+            continue;
+        };
+        let new = to.join(rest);
+        let Some(listed) = entry.get("mcpServers").and_then(Value::as_object) else {
+            continue;
+        };
+        for server in servers.iter().filter(|s| listed.contains_key(&s.name)) {
+            let at = |folder: &Path| Where::Claude {
+                state: cfg.claude_state.clone(),
+                project: Some((folder.to_path_buf(), folder.to_path_buf())),
+            };
+            if old.is_dir() {
+                out.0.push(Change::McpRemove {
+                    at: at(&old),
+                    name: server.name.clone(),
+                    in_project: true,
+                });
+            } else {
+                out.2.push(format!(
+                    "Claude still lists `{}` for {}, which is gone: `claude mcp remove -s local {}` in a folder made at that path takes it out",
+                    server.name,
+                    tilde(&old),
+                    server.name
+                ));
+            }
+            out.1.push(Change::McpSet {
+                at: at(&new),
+                name: server.name.clone(),
+                spec: server.spec.clone(),
+            });
+        }
+    }
+    out
+}
+
 impl Mcps {
     pub fn build(cfg: &Config, projects: &Projects) -> Mcps {
         let (servers, error) = match load(&cfg.source.mcp, &cfg.tokens) {
             Ok(s) => (s, None),
-            Err(e) => (Vec::new(), Some(format!("{e:#}"))),
+            Err(e) => (Vec::new(), Some(crate::said(&e))),
         };
         // Read once: Claude's state file can run to megabytes.
         let claude = (!servers.is_empty())
@@ -1512,27 +1577,28 @@ impl Mcps {
                     .collect()
             })
             .collect();
-        let (projects, shared) = projects
-            .list
-            .iter()
-            .map(|p| {
-                if servers.is_empty() {
-                    return (Vec::new(), false);
-                }
-                let (slots, shared) = slots(cfg, &p.root);
-                let cells = servers
-                    .iter()
-                    .map(|s| project_cell(&p.root, &slots, s, claude))
-                    .collect();
-                (cells, shared)
-            })
-            .unzip();
+        // A workspace keeps its servers in its own folder, as a project does.
+        let folder = |root: &Path| {
+            if servers.is_empty() || !root.is_dir() {
+                return (Vec::new(), false);
+            }
+            let (slots, shared) = slots(cfg, root);
+            let cells = servers
+                .iter()
+                .map(|s| project_cell(root, &slots, s, claude))
+                .collect();
+            (cells, shared)
+        };
+        let (projects, shared) = projects.list.iter().map(|p| folder(&p.root)).unzip();
+        let (spaces, spaces_shared) = cfg.workspaces.iter().map(|w| folder(&w.root)).unzip();
         Mcps {
             servers,
             error,
             cells,
             projects,
             shared,
+            spaces,
+            spaces_shared,
         }
     }
 
@@ -1545,12 +1611,43 @@ impl Mcps {
         })
     }
 
-    /// The projects' cells, which count only when no single agent is asked about.
+    /// The projects' and workspaces' cells, which count only when no single
+    /// agent is asked about.
     fn in_projects(&self, only: Option<usize>) -> impl Iterator<Item = &projects::Cell> {
         self.projects
             .iter()
+            .chain(&self.spaces)
             .flatten()
             .filter(move |_| only.is_none())
+    }
+
+    /// What `fix` does in the agents' and projects' cells, the MCPs tab's.
+    pub fn tab_fixes(&self) -> Vec<Change> {
+        let broken = |s: &State| matches!(s, State::Broken(_));
+        plan::dedup(
+            self.of(None)
+                .filter(|c| broken(&c.state))
+                .filter_map(|c| c.change.clone())
+                .chain(
+                    self.projects
+                        .iter()
+                        .flatten()
+                        .filter(|c| broken(&c.state))
+                        .filter_map(|c| c.change.clone()),
+                ),
+        )
+    }
+
+    /// What `fix` does in workspace `i`'s cells.
+    pub fn space_fixes(&self, i: usize) -> Vec<Change> {
+        self.spaces.get(i).map_or_else(Vec::new, |cells| {
+            plan::dedup(
+                cells
+                    .iter()
+                    .filter(|c| matches!(c.state, State::Broken(_)))
+                    .filter_map(|c| c.change.clone()),
+            )
+        })
     }
 
     /// What `fix` does: rewrite what differs and complete a project only some
@@ -1590,7 +1687,11 @@ impl Mcps {
         for (i, s) in self.servers.iter().enumerate() {
             let Some(kept) = s.kept() else { continue };
             let used = self.cells[i].iter().any(|c| c.state == State::Linked)
-                || self.projects.iter().any(|p| p[i].state == State::Linked);
+                || self
+                    .projects
+                    .iter()
+                    .chain(&self.spaces)
+                    .any(|p| p.get(i).is_some_and(|c| c.state == State::Linked));
             if !used {
                 continue;
             }
@@ -1626,7 +1727,11 @@ impl Mcps {
             .enumerate()
             .filter(|(i, _)| {
                 self.cells[*i].iter().any(|c| c.state == State::Linked)
-                    || self.projects.iter().any(|p| p[*i].state == State::Linked)
+                    || self
+                        .projects
+                        .iter()
+                        .chain(&self.spaces)
+                        .any(|p| p.get(*i).is_some_and(|c| c.state == State::Linked))
             })
             .flat_map(|(_, s)| {
                 s.vars()

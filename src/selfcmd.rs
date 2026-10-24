@@ -59,7 +59,11 @@ fn update(args: UpdateArgs) {
             std::process::exit(status.code().unwrap_or(1));
         }
         Err(e) => {
-            eprintln!("{} {e}", "canon: could not run cargo:".red());
+            eprintln!(
+                "{} {}",
+                "canon: could not run cargo:".red(),
+                crate::os_words(&e)
+            );
             eprintln!(
                 "{}",
                 "is cargo installed and on your PATH? (https://rustup.rs)".dimmed()
@@ -102,7 +106,7 @@ fn latest() -> Result<String, String> {
     let out = Command::new("cargo")
         .args(["search", CRATE, "--limit", "1"])
         .output()
-        .map_err(|e| format!("could not run cargo: {e}"))?;
+        .map_err(|e| format!("could not run cargo: {}", crate::os_words(&e)))?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }

@@ -9,6 +9,7 @@ use crate::mcp::Mcps;
 use crate::plan::{self, Change, Plan, Row, State};
 use crate::projects::{self, Projects};
 use crate::setup;
+use crate::workspaces::{self, Workspaces};
 use anyhow::{Context, Result, bail};
 use colored::Colorize;
 use std::fs;
@@ -48,15 +49,43 @@ pub struct ChangeArgs {
 pub struct PlaceArgs {
     /// The convention, as `canon status` names it (`rust`) or by its file name
     pub convention: String,
-    /// A project, as `canon status` names it or by its path (`.` for this one)
-    #[arg(value_name = "PROJECT")]
+    /// A project or a workspace, as `canon status` names it or by its path (`.` for this one)
+    #[arg(value_name = "PLACE")]
     pub projects: Vec<String>,
     /// An agent, which reads a convention in every project; once per agent
     #[arg(short, long = "agent", value_name = "NAME")]
     pub agents: Vec<String>,
-    /// Every project, or every agent (one that cannot read another file is skipped)
+    /// Every project, every workspace, or every agent (one that cannot read another file is skipped)
     #[arg(long, value_enum, value_name = "WHERE")]
     pub every: Vec<Every>,
+    /// Dry run: print what would change and change nothing
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+}
+
+#[derive(clap::Args)]
+pub struct LinkArgs {
+    /// The folder you work in outside your projects' repos, such as one holding a folder per issue
+    pub workspace: String,
+    /// A project it is for, as `canon status` names it or by its path, one or more
+    #[arg(required = true, value_name = "PROJECT")]
+    pub projects: Vec<String>,
+    /// Dry run: print what would change and change nothing
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+}
+
+#[derive(clap::Args)]
+pub struct UnlinkArgs {
+    /// The workspace, by its path as `canon status` prints it (left out with `--all`)
+    #[arg(required_unless_present = "all", conflicts_with = "all")]
+    pub workspace: Option<String>,
+    /// A project to drop from it, which keeps it for the rest, or none to forget it whole
+    #[arg(value_name = "PROJECT", conflicts_with = "all")]
+    pub projects: Vec<String>,
+    /// Every workspace
+    #[arg(long)]
+    pub all: bool,
     /// Dry run: print what would change and change nothing
     #[arg(short = 'n', long)]
     pub dry_run: bool,
@@ -65,6 +94,7 @@ pub struct PlaceArgs {
 #[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Every {
     Project,
+    Workspace,
     Agent,
 }
 
@@ -128,7 +158,7 @@ pub struct EvictArgs {
 
 #[derive(clap::Args)]
 pub struct MoveArgs {
-    /// `canon` for the whole folder, or the name of something inside it
+    /// `canon` for the whole folder, the name of something inside it, or the path (from `~`, `/` or `./`) of a workspace or a project
     pub what: String,
     /// Where it goes: a folder to move it into, or its new name
     pub to: String,
@@ -200,31 +230,30 @@ pub fn status(args: AgentArgs) -> Result<i32> {
     let projects = Projects::build(&cfg);
     let houses = Houses::build(&cfg);
     let mcps = Mcps::build(&cfg, &projects);
+    let spaces = Workspaces::build(&cfg, &projects);
     let unsettled = plan.unsettled(only);
     // With `-a`, only that agent's drift counts: the projects' rows are not
     // printed either, so a gate on one agent is about that agent alone.
     let unfixed = plan.drifted(only)
         || houses.drifted(only)
         || mcps.drifted(only)
+        || spaces.drifted(only)
         || (only.is_none() && projects.drifted());
     let unapproved = if only.is_none() {
         projects.unapproved()
     } else {
         Vec::new()
     };
-    let elsewhere = foreign_elsewhere(&cfg, &houses, &projects, &mcps, only);
+    let elsewhere = foreign_elsewhere(&cfg, &houses, &projects, &mcps, &spaces, only);
     let code = i32::from(
         unfixed
             || (args.strict
                 && (!unsettled.is_empty() || !unapproved.is_empty() || !elsewhere.is_empty())),
     );
     if args.json {
-        out!(
-            "{}",
-            serde_json::to_string_pretty(&status_json(
-                &cfg, &plan, &houses, &projects, &mcps, only, code
-            ))?
-        );
+        let mut json = status_json(&cfg, &plan, &houses, &projects, &mcps, &spaces, only);
+        json["exit"] = code.into();
+        out!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(code);
     }
     let cols: Vec<usize> = (0..cfg.agents.len())
@@ -313,6 +342,7 @@ pub fn status(args: AgentArgs) -> Result<i32> {
     }
     let shown = (only.is_none() && !cfg.projects.is_empty()).then_some(&projects);
     print_houses(&cfg, &houses, shown, &cols, &mut notes);
+    print_workspaces(&cfg, &spaces, &mcps, &projects, &cols, &mut notes);
     print_mcp(&cfg, &mcps, shown, &cols, &mut notes);
     if !notes.is_empty() {
         out!();
@@ -368,33 +398,118 @@ pub fn status(args: AgentArgs) -> Result<i32> {
 struct Foreign {
     agent: Option<String>,
     kind: &'static str,
+    /// The state `--json` gives it.
+    state: &'static str,
     name: String,
     /// The project it is in, when it is in one.
     project: Option<PathBuf>,
+    /// The workspace it is in, when it is in one.
+    workspace: Option<PathBuf>,
     /// How `status` names it.
     who: String,
     why: String,
 }
 
-/// Every foreign cell of the conventions and MCP tables, and every project
-/// whose Claude wiring canonize refuses; a project's only without `-a`.
+/// Every foreign cell of the conventions, workspaces and MCP tables, every
+/// project a workspace points at that is gone, and every project whose Claude
+/// wiring canonize refuses, but a project's or workspace's MCP cell only
+/// without `-a`.
 fn foreign_elsewhere(
     cfg: &Config,
     houses: &Houses,
     projects: &Projects,
     mcps: &Mcps,
+    spaces: &Workspaces,
     only: Option<usize>,
 ) -> Vec<Foreign> {
     let mut out = Vec::new();
     let agents = |a: &usize| only.is_none_or(|o| o == *a);
+    for (i, e) in spaces.list.iter().enumerate() {
+        let who = tilde(&e.root);
+        if e.here && e.projects.is_empty() {
+            out.push(Foreign {
+                agent: None,
+                kind: "workspace",
+                state: "broken",
+                name: e.root.display().to_string(),
+                project: None,
+                workspace: Some(e.root.clone()),
+                who: who.clone(),
+                why: format!(
+                    "it points at no project: `canon link {} <PROJECT>` gives it one, `canon unlink {}` forgets it",
+                    e.key, e.key
+                ),
+            });
+        }
+        for gone in e.gone.iter().filter(|_| e.here) {
+            out.push(Foreign {
+                agent: None,
+                kind: "workspace",
+                state: "broken",
+                name: e.root.display().to_string(),
+                project: Some(gone.clone()),
+                workspace: Some(e.root.clone()),
+                who: who.clone(),
+                why: format!(
+                    "the project at `{}` is not there: `canon link {} <PROJECT>` adds where it went, `canon unlink {} {}` drops it",
+                    tilde(gone),
+                    e.key,
+                    e.key,
+                    tilde(gone)
+                ),
+            });
+        }
+        if only.is_none() {
+            for (s, c) in mcps
+                .servers
+                .iter()
+                .zip(mcps.spaces.get(i).into_iter().flatten())
+            {
+                if let State::Foreign(why) = &c.state {
+                    out.push(Foreign {
+                        agent: None,
+                        kind: "mcp",
+                        state: "foreign",
+                        name: s.name.clone(),
+                        project: None,
+                        workspace: Some(e.root.clone()),
+                        who: format!("{who} {}", s.name),
+                        why: why.clone(),
+                    });
+                }
+            }
+        }
+        // An AGENTS.md read by three agents is one file to move aside.
+        let mut said: Vec<&std::path::Path> = Vec::new();
+        for (a, c) in e.cells.iter().enumerate().filter(|(a, _)| agents(a)) {
+            if let State::Foreign(why) = &c.state {
+                if said.contains(&c.at.as_path()) {
+                    continue;
+                }
+                said.push(&c.at);
+                out.push(Foreign {
+                    agent: Some(cfg.agents[a].name.clone()),
+                    kind: "workspace",
+                    state: "foreign",
+                    name: e.root.display().to_string(),
+                    project: None,
+                    workspace: Some(e.root.clone()),
+                    who: who.clone(),
+                    why: format!("{why}: move it aside, then run `canon fix`"),
+                });
+            }
+        }
+    }
     for (h, row) in houses.house.iter().zip(&houses.cells) {
         for (a, c) in row.iter().enumerate().filter(|(a, _)| agents(a)) {
             if let State::Foreign(why) = &c.state {
                 out.push(Foreign {
                     agent: Some(cfg.agents[a].name.clone()),
                     kind: "convention",
+                    state: "foreign",
                     name: house_label(h),
                     project: None,
+                    workspace: None,
                     who: format!("{} {}", cfg.agents[a].name, house_label(h)),
                     why: why.clone(),
                 });
@@ -407,8 +522,10 @@ fn foreign_elsewhere(
                 out.push(Foreign {
                     agent: Some(cfg.agents[a].name.clone()),
                     kind: "mcp",
+                    state: "foreign",
                     name: s.name.clone(),
                     project: None,
+                    workspace: None,
                     who: format!("{} {}", cfg.agents[a].name, s.name),
                     why: why.clone(),
                 });
@@ -425,8 +542,10 @@ fn foreign_elsewhere(
                 out.push(Foreign {
                     agent: None,
                     kind: "mcp",
+                    state: "foreign",
                     name: s.name.clone(),
                     project: Some(p.root.clone()),
+                    workspace: None,
                     who: format!("{short} {}", s.name),
                     why: why.clone(),
                 });
@@ -438,8 +557,10 @@ fn foreign_elsewhere(
                     out.push(Foreign {
                         agent: Some("claude".into()),
                         kind: "project",
+                        state: "foreign",
                         name: p.root.display().to_string(),
                         project: Some(p.root.clone()),
+                        workspace: None,
                         who: short.clone(),
                         why: why.clone(),
                     });
@@ -509,15 +630,15 @@ fn writes_into_canon(cfg: &Config, only: Option<usize>) -> Option<(Vec<String>, 
 }
 
 /// Everything `canon status` prints, as JSON: the same states under names that
-/// do not change, and absolute paths.
+/// do not change, and absolute paths, short of `exit`, which the caller knows.
 fn status_json(
     cfg: &Config,
     plan: &Plan,
     houses: &Houses,
     projects: &Projects,
     mcps: &Mcps,
+    spaces: &Workspaces,
     only: Option<usize>,
-    code: i32,
 ) -> serde_json::Value {
     use serde_json::{Value, json};
     let cols: Vec<usize> = (0..cfg.agents.len())
@@ -624,14 +745,54 @@ fn status_json(
                 "kind": plan.rows[r].kind(),
                 "name": plan.rows[r].name(),
                 "project": null,
+                "workspace": null,
                 "state": plan.cells[r][a].state.id(),
                 "why": plan.cells[r][a].state.why(),
                 "advice": advice(cfg, plan, r, a),
             })
         })
         .collect();
+    let spaces_json: Vec<Value> = spaces
+        .list
+        .iter()
+        .map(|e| {
+            let cells: serde_json::Map<String, Value> = cols
+                .iter()
+                .filter(|&&i| cfg.agents[i].active())
+                .map(|&i| {
+                    let c = &e.cells[i];
+                    (
+                        cfg.agents[i].name.clone(),
+                        json!({ "state": c.state.id(), "why": c.state.why(), "at": c.at }),
+                    )
+                })
+                .collect();
+            let conventions: serde_json::Map<String, Value> = projects
+                .house
+                .iter()
+                .zip(&e.own.cells)
+                .map(|(h, c)| {
+                    (
+                        house_label(h),
+                        json!({ "state": c.state.id(), "why": c.state.why() }),
+                    )
+                })
+                .collect();
+            json!({
+                "path": e.root,
+                "projects": e.projects,
+                "here": e.here,
+                "gone": e.gone,
+                "git": e.git,
+                "context": { "path": e.root.join(workspaces::CONTEXT_FILE), "there": e.context },
+                "cells": cells,
+                "conventions": conventions,
+                "dead": e.own.dead,
+            })
+        })
+        .collect();
     unsettled.extend(
-        foreign_elsewhere(cfg, houses, projects, mcps, only)
+        foreign_elsewhere(cfg, houses, projects, mcps, spaces, only)
             .into_iter()
             .map(|f| {
                 json!({
@@ -639,7 +800,8 @@ fn status_json(
                     "kind": f.kind,
                     "name": f.name,
                     "project": f.project,
-                    "state": "foreign",
+                    "workspace": f.workspace,
+                    "state": f.state,
                     "why": f.why,
                     "advice": f.why,
                 })
@@ -652,6 +814,7 @@ fn status_json(
                 "kind": "project",
                 "name": p.root,
                 "project": p.root,
+                "workspace": null,
                 "state": a.id(),
                 "why": null,
                 "advice": a.advice(cfg, p),
@@ -667,6 +830,7 @@ fn status_json(
         "stale": plan.stale_for(only).into_iter().map(Change::describe).collect::<Vec<_>>(),
         "conventions": houses_json,
         "projects": projects_json,
+        "workspaces": spaces_json,
         "unsettled": unsettled,
         "strays": config::strays(&cfg.source)
             .into_iter()
@@ -675,12 +839,12 @@ fn status_json(
         "writes_into_canon": writes_into_canon(cfg, only).map(|(agents, advice)| json!({
             "agents": agents, "advice": advice
         })),
-        "mcp": mcp_json(cfg, mcps, projects, &cols),
+        "mcp": mcp_json(cfg, mcps, projects, spaces, &cols),
         "drifted": plan.drifted(only)
             || houses.drifted(only)
             || mcps.drifted(only)
+            || spaces.drifted(only)
             || (only.is_none() && projects.drifted()),
-        "exit": code,
     })
 }
 
@@ -733,7 +897,13 @@ fn mcp_state(state: &State) -> &'static str {
 
 /// The MCP servers for a script: each with every agent's cell and every
 /// project's, under the same names the tables use.
-fn mcp_json(cfg: &Config, m: &Mcps, p: &Projects, cols: &[usize]) -> serde_json::Value {
+fn mcp_json(
+    cfg: &Config,
+    m: &Mcps,
+    p: &Projects,
+    spaces: &Workspaces,
+    cols: &[usize],
+) -> serde_json::Value {
     use serde_json::{Value, json};
     let servers: Vec<Value> = m
         .servers
@@ -778,11 +948,31 @@ fn mcp_json(cfg: &Config, m: &Mcps, p: &Projects, cols: &[usize]) -> serde_json:
             json!({ "path": x.root, "name": projects::short(cfg, &x.root), "servers": servers })
         })
         .collect();
+    let in_spaces: Vec<Value> = spaces
+        .list
+        .iter()
+        .zip(&m.spaces)
+        .map(|(e, cells)| {
+            let servers: serde_json::Map<String, Value> = m
+                .servers
+                .iter()
+                .zip(cells)
+                .map(|(s, c)| {
+                    (
+                        s.name.clone(),
+                        json!({ "state": mcp_state(&c.state), "why": c.state.why() }),
+                    )
+                })
+                .collect();
+            json!({ "path": e.root, "servers": servers })
+        })
+        .collect();
     json!({
         "file": cfg.source.mcp,
         "error": m.error,
         "servers": servers,
         "projects": projects,
+        "workspaces": in_spaces,
         "unset": m.unset().into_iter().map(|(s, v)| json!({ "server": s, "var": v })).collect::<Vec<_>>(),
     })
 }
@@ -999,6 +1189,164 @@ fn print_projects(cfg: &Config, p: &Projects, label_w: usize, notes: &mut Vec<St
     }
 }
 
+/// One row per workspace, the file each active agent reads at its top, then
+/// the projects it points at, with a line under it naming its own conventions
+/// and MCP servers when it has any. Printed only when there is a workspace.
+fn print_workspaces(
+    cfg: &Config,
+    w: &Workspaces,
+    m: &Mcps,
+    p: &Projects,
+    cols: &[usize],
+    notes: &mut Vec<String>,
+) {
+    if w.list.is_empty() {
+        return;
+    }
+    out!();
+    const TITLE: &str = "workspaces";
+    let shown: Vec<usize> = cols
+        .iter()
+        .copied()
+        .filter(|&i| cfg.agents[i].active())
+        .collect();
+    let label_w = w
+        .list
+        .iter()
+        .map(|e| tilde(&e.root).chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(TITLE.len());
+    let col_w: usize = 10;
+    let mut head = format!("{}{}", TITLE.dimmed(), " ".repeat(label_w - TITLE.len()));
+    for &i in &shown {
+        let name = &cfg.agents[i].name;
+        head.push_str(&format!(
+            "  {}{}",
+            name.bold(),
+            " ".repeat(col_w.saturating_sub(name.chars().count()))
+        ));
+    }
+    head.push_str(&format!("  {}", "projects".dimmed()));
+    out!("{head}");
+    let has = |name: &str| shown.iter().any(|&i| cfg.agents[i].name == name);
+    let mut codex = Vec::new();
+    let mut claude = Vec::new();
+    for (n, e) in w.list.iter().enumerate() {
+        let root = tilde(&e.root);
+        let mut line = format!("{root:label_w$}");
+        for &i in &shown {
+            let s = &e.cells[i].state;
+            line.push_str(&format!(
+                "  {}{}",
+                paint(s),
+                " ".repeat(col_w.saturating_sub(s.word().len()))
+            ));
+        }
+        let names: Vec<String> = e.projects.iter().map(|x| projects::short(cfg, x)).collect();
+        line.push_str(&format!("  {}", names.join(", ")));
+        out!("{line}");
+        if !e.here {
+            notes.push(format!(
+                "{root}: not on this machine, so nothing is written there"
+            ));
+            continue;
+        }
+        let imported = |s: &State| matches!(s, State::Linked | State::Broken(_));
+        let conventions: Vec<String> = p
+            .house
+            .iter()
+            .zip(&e.own.cells)
+            .filter(|(_, c)| imported(&c.state))
+            .map(|(h, _)| house_label(h))
+            .collect();
+        let cells = m.spaces.get(n).map_or(&[][..], Vec::as_slice);
+        let servers: Vec<&str> = m
+            .servers
+            .iter()
+            .zip(cells)
+            .filter(|(_, c)| imported(&c.state))
+            .map(|(s, _)| s.name.as_str())
+            .collect();
+        let mut own = Vec::new();
+        if !conventions.is_empty() {
+            own.push(format!(
+                "{} {}",
+                "conventions".dimmed(),
+                conventions.join(", ")
+            ));
+        }
+        if !servers.is_empty() {
+            own.push(format!("{} {}", "mcp".dimmed(), servers.join(", ")));
+        }
+        if !own.is_empty() {
+            out!(
+                "{}  {}",
+                " ".repeat(label_w),
+                own.join(&format!(" {} ", "·".dimmed()))
+            );
+        }
+        if !conventions.is_empty()
+            && let Some((_, why)) = e.unread()
+        {
+            notes.push(format!("{root}: {why}"));
+        }
+        let mut said: Vec<&std::path::Path> = Vec::new();
+        for &i in &shown {
+            let c = &e.cells[i];
+            if let (State::Broken(why), Some(_)) = (&c.state, &c.change)
+                && !said.contains(&c.at.as_path())
+            {
+                said.push(&c.at);
+                notes.push(format!("{}: {why}", tilde(&c.at)));
+            }
+        }
+        if cols.len() == cfg.agents.len() {
+            for (h, c) in p.house.iter().zip(&e.own.cells) {
+                if let State::Broken(why) = &c.state {
+                    notes.push(format!("{root} {}: {why}", house_label(h)));
+                }
+            }
+            if e.own.uses_canon() {
+                for c in e.own.wiring_changes() {
+                    notes.push(format!("{root}: {}", c.describe()));
+                }
+            }
+            for d in &e.own.dead {
+                notes.push(format!("{root}: `{d}` names a file that does not exist"));
+            }
+            for (s, c) in m.servers.iter().zip(cells) {
+                if let State::Broken(why) = &c.state {
+                    notes.push(format!("{root} {}: {why}", s.name));
+                }
+            }
+        }
+        if !e.git && has("codex") {
+            codex.push(root.clone());
+        }
+        let shared = m.spaces_shared.get(n) == Some(&true);
+        if !e.git && has("claude") && !servers.is_empty() && !shared {
+            claude.push(root);
+        }
+    }
+    let which = |list: &[String]| match list {
+        [one] => (one.clone(), "it"),
+        _ => (list.join(", "), "each"),
+    };
+    if !codex.is_empty() {
+        let (which, each) = which(&codex);
+        notes.push(format!(
+            "codex: outside a git repo it reads AGENTS.md only in the folder it starts in, so from a folder under {which} it never sees the one there: making {each} a git repo fixes that"
+        ));
+    }
+    if !claude.is_empty() {
+        let (which, each) = which(&claude);
+        notes.push(format!(
+            "claude: outside a git repo it keeps MCP servers per folder, so from a folder under {which} it never sees the ones there: making {each} a git repo fixes that"
+        ));
+    }
+}
+
 fn run_changes(changes: Vec<Change>, dry_run: bool, nothing: &str) -> i32 {
     if changes.is_empty() {
         if !nothing.is_empty() {
@@ -1012,11 +1360,19 @@ fn run_changes(changes: Vec<Change>, dry_run: bool, nothing: &str) -> i32 {
             out!("would {}", c.describe());
             continue;
         }
+        if failed > 0 && c.after_all() {
+            eprintln!(
+                "{} {}: not done, since a step before it failed",
+                "✗".red(),
+                c.describe()
+            );
+            continue;
+        }
         match c.run() {
             Ok(()) => out!("{} {}", "✓".green(), c.describe()),
             Err(e) => {
                 failed += 1;
-                eprintln!("{} {}: {e:#}", "✗".red(), c.describe());
+                eprintln!("{} {}: {}", "✗".red(), c.describe(), crate::said(&e));
             }
         }
     }
@@ -1027,19 +1383,21 @@ pub fn fix(args: ChangeArgs) -> Result<i32> {
     let cfg = config::load()?;
     let only = pick(&cfg, &args.agent)?;
     let plan = Plan::build(&cfg);
+    let projects = Projects::build(&cfg);
     let changes = match only {
         Some(i) => plan.changes_for(i),
         None => {
             let mut all = plan.changes();
-            all.extend(Projects::build(&cfg).fixes());
+            all.extend(projects.fixes());
             all
         }
     };
-    let mcps = Mcps::build(&cfg, &Projects::build(&cfg)).fixes(only);
+    let mcps = Mcps::build(&cfg, &projects).fixes(only);
     let changes = plan::dedup(
         changes
             .into_iter()
             .chain(Houses::build(&cfg).fixes(only))
+            .chain(Workspaces::build(&cfg, &projects).fixes(only))
             .chain(mcps),
     );
     Ok(run_changes(
@@ -1053,13 +1411,15 @@ pub fn delete(args: ChangeArgs) -> Result<i32> {
     let cfg = config::load()?;
     let only = pick(&cfg, &args.agent)?;
     let plan = Plan::build(&cfg);
+    let projects = Projects::build(&cfg);
     let mut changes = plan.undos(only);
     changes.extend(Houses::build(&cfg).undos(only));
-    changes.extend(Mcps::build(&cfg, &Projects::build(&cfg)).undos(only));
+    changes.extend(Workspaces::build(&cfg, &projects).undos(only));
+    changes.extend(Mcps::build(&cfg, &projects).undos(only));
     // Without `-a` it takes back everything, each project's CANON.md wiring
     // included, which is what `--help` promises.
     if only.is_none() {
-        for p in &Projects::build(&cfg).list {
+        for p in &projects.list {
             changes.extend(p.undos());
         }
     }
@@ -1067,23 +1427,32 @@ pub fn delete(args: ChangeArgs) -> Result<i32> {
 }
 
 /// `canon add` and, with `remove`, `canon remove`: one convention in the
-/// projects and agents named. A target that already has it, or has nothing to
-/// take back, is said and skipped; an agent named that cannot read it is an
-/// error before anything changes. Bulk targets skip both without a word.
+/// projects, workspaces and agents named. A target that already has it, or
+/// has nothing to take back, is said and skipped, while an agent named that
+/// cannot read it is an error before anything changes. Bulk targets skip both without
+/// a word.
 pub fn place(args: PlaceArgs, remove: bool) -> Result<i32> {
     let cfg = config::load()?;
     let projects = Projects::build(&cfg);
     let houses = Houses::build(&cfg);
+    let spaces = Workspaces::build(&cfg, &projects);
     let col = convention(&houses.house, &args.convention)?;
     let label = house_label(&houses.house[col]);
     let every = |e| args.every.contains(&e);
 
     let mut picked: Vec<(usize, bool)> = Vec::new();
+    let mut folders: Vec<(usize, bool)> = Vec::new();
     for arg in &args.projects {
-        picked.push((project_index(&cfg, &projects, arg)?, true));
+        match space_index(&cfg, arg) {
+            Some(i) => folders.push((i, true)),
+            None => picked.push((project_index(&cfg, &projects, arg)?, true)),
+        }
     }
     if every(Every::Project) {
         picked.extend((0..projects.list.len()).map(|i| (i, false)));
+    }
+    if every(Every::Workspace) {
+        folders.extend((0..spaces.list.len()).map(|i| (i, false)));
     }
     let mut agents: Vec<(usize, bool)> = Vec::new();
     for name in &args.agents {
@@ -1092,8 +1461,10 @@ pub fn place(args: PlaceArgs, remove: bool) -> Result<i32> {
     if every(Every::Agent) {
         agents.extend((0..cfg.agents.len()).map(|a| (a, false)));
     }
-    if picked.is_empty() && agents.is_empty() {
-        bail!("say where: a project, `-a AGENT`, or `--every project|agent`");
+    if picked.is_empty() && folders.is_empty() && agents.is_empty() {
+        bail!(
+            "say where: a project or workspace, `-a AGENT`, or `--every project|workspace|agent`"
+        );
     }
 
     let mut notes = Vec::new();
@@ -1124,13 +1495,18 @@ pub fn place(args: PlaceArgs, remove: bool) -> Result<i32> {
             },
         }
     }
+    // Each workspace is rewritten once, with every project here it lists.
+    let mut edits: Vec<workspaces::Edit> = Vec::new();
     for &(i, named) in &picked {
         let p = &projects.list[i];
         let cell = &p.cells[col];
         let name = projects::short(&cfg, &p.root);
         if remove {
             match &cell.undo {
-                Some(u) => changes.push(u.clone()),
+                Some(u) => {
+                    changes.push(u.clone());
+                    edits.push((p, Vec::new(), vec![col]));
+                }
                 None if named => notes.push(format!("{name} does not import {label}")),
                 None => {}
             }
@@ -1140,6 +1516,53 @@ pub fn place(args: PlaceArgs, remove: bool) -> Result<i32> {
             Some(c) => {
                 changes.push(c.clone());
                 changes.extend(p.wiring_changes());
+                edits.push((p, vec![col], Vec::new()));
+            }
+            None if named => notes.push(format!("{name} already imports {label}")),
+            None => {}
+        }
+    }
+    changes.extend(workspaces::refresh(&cfg, &projects, &edits));
+    for &(i, named) in &folders {
+        let e = &spaces.list[i];
+        let name = tilde(&e.root);
+        if !e.here {
+            if named {
+                notes.push(format!("{name} is not on this machine"));
+            }
+            continue;
+        }
+        let cell = &e.own.cells[col];
+        let reach = workspaces::Reach::new(&cfg, e.brought(col), &houses.cells[col]);
+        let from = reach.note(("reads", "read"));
+        if remove {
+            match (&cell.undo, from) {
+                (Some(u), _) => changes.push(u.clone()),
+                (None, Some(from)) if named => {
+                    notes.push(format!("{name} does not import {label} itself: {from}"))
+                }
+                (None, _) if named => notes.push(format!("{name} does not import {label}")),
+                (None, _) => {}
+            }
+            continue;
+        }
+        if cell.state == State::Missing && reach.covered() {
+            if named {
+                let from = from.unwrap_or_default();
+                notes.push(format!("{name} already reads {label}: {from}"));
+            }
+            continue;
+        }
+        // The workspace's files are what point its agents at its CANON.md.
+        match &cell.change {
+            Some(c) => {
+                changes.push(c.clone());
+                changes.extend(e.own.wiring_changes());
+                changes.extend(e.file_fixes(None));
+                // A file missing is written above, but one of the user's stays.
+                if let Some((State::Foreign(_), why)) = e.unread() {
+                    notes.push(format!("{name}: {why}"));
+                }
             }
             None if named => notes.push(format!("{name} already imports {label}")),
             None => {}
@@ -1172,6 +1595,109 @@ pub fn place(args: PlaceArgs, remove: bool) -> Result<i32> {
     Ok(code)
 }
 
+/// `canon link`: point a workspace at one project or more, adding to the ones
+/// it has, and write the file each agent reads at its top.
+pub fn link(args: LinkArgs) -> Result<i32> {
+    let cfg = config::load()?;
+    let projects = Projects::build(&cfg);
+    let mut adding = Vec::new();
+    for arg in &args.projects {
+        adding.push(
+            projects.list[project_index(&cfg, &projects, arg)?]
+                .root
+                .clone(),
+        );
+    }
+    let l = workspaces::link(&cfg, &projects, &args.workspace, &adding)?;
+    let files = l.entry.file_fixes(None);
+    let quiet = l.setting.is_some() || !files.is_empty();
+    if let Some(setting) = l.setting {
+        let code = run_changes(vec![setting], args.dry_run, "");
+        if code != 0 {
+            return Ok(code);
+        }
+    }
+    let names: Vec<String> = adding.iter().map(|p| projects::short(&cfg, p)).collect();
+    let nothing = format!("{} already points at {}", l.key, names.join(", "));
+    let code = run_changes(files, args.dry_run, if quiet { "" } else { &nothing });
+    for why in l.entry.foreign() {
+        out!(
+            "{}",
+            format!("{why}: move it aside, then run `canon fix`").dimmed()
+        );
+    }
+    Ok(code)
+}
+
+/// `canon unlink`: drop projects from a workspace, or with none named take
+/// back everything canonize made there and forget it, or every workspace with
+/// `--all`.
+pub fn unlink(args: UnlinkArgs) -> Result<i32> {
+    let cfg = config::load()?;
+    let projects = Projects::build(&cfg);
+    let spaces = Workspaces::build(&cfg, &projects);
+    let mcps = Mcps::build(&cfg, &projects);
+    let servers = |i: usize| mcps.spaces.get(i).map_or(&[][..], Vec::as_slice);
+    let picked: Vec<usize> = match &args.workspace {
+        None => (0..spaces.list.len()).collect(),
+        Some(arg) => vec![space_index(&cfg, arg).with_context(|| {
+            format!(
+                "`{}` is not a workspace canonize knows: `canon status` lists them",
+                tilde(&workspaces::real(arg))
+            )
+        })?],
+    };
+    let mut changes = Vec::new();
+    for i in picked {
+        let e = &spaces.list[i];
+        if args.projects.is_empty() {
+            changes.extend(workspaces::unlinking(&cfg, e, servers(i)));
+            continue;
+        }
+        let mut removing = Vec::new();
+        for arg in &args.projects {
+            removing.push(listed(&cfg, e, arg)?);
+        }
+        changes.extend(workspaces::dropping(
+            &cfg,
+            &projects,
+            e,
+            servers(i),
+            &removing,
+        ));
+    }
+    Ok(run_changes(changes, args.dry_run, "no workspace to unlink"))
+}
+
+/// The workspace `arg` names, by its key or its path, as an index into
+/// `Config::workspaces`.
+fn space_index(cfg: &Config, arg: &str) -> Option<usize> {
+    let real = workspaces::real(arg);
+    cfg.workspaces
+        .iter()
+        .position(|w| w.key == arg || workspaces::same(&w.root, &real))
+}
+
+/// The project of `e` that `arg` names, as `canon status` prints it or by its
+/// path, whether or not it is still there.
+fn listed(cfg: &Config, e: &workspaces::Entry, arg: &str) -> Result<PathBuf> {
+    let real = workspaces::real(arg);
+    if let Some(p) = e.projects.iter().find(|p| {
+        projects::short(cfg, p) == arg
+            || tilde(p) == arg
+            || **p == config::expand(arg)
+            || workspaces::same(p, &real)
+    }) {
+        return Ok(p.clone());
+    }
+    let names: Vec<String> = e.projects.iter().map(|p| projects::short(cfg, p)).collect();
+    bail!(
+        "`{arg}` is not a project {} points at: it points at `{}`",
+        e.key,
+        names.join("`, `")
+    )
+}
+
 /// The convention `arg` names, by its label or its file name.
 fn convention(house: &[PathBuf], arg: &str) -> Result<usize> {
     let want = house_label(std::path::Path::new(arg));
@@ -1186,7 +1712,7 @@ fn convention(house: &[PathBuf], arg: &str) -> Result<usize> {
 }
 
 /// The project `arg` names, as `canon status` prints it or by its path.
-fn project_index(cfg: &Config, p: &Projects, arg: &str) -> Result<usize> {
+pub fn project_index(cfg: &Config, p: &Projects, arg: &str) -> Result<usize> {
     if let Some(i) = p
         .list
         .iter()
@@ -1207,7 +1733,7 @@ fn project_index(cfg: &Config, p: &Projects, arg: &str) -> Result<usize> {
     }
     let dirs: Vec<String> = cfg.projects.iter().map(|d| tilde(d)).collect();
     bail!(
-        "`{arg}` is not a project canonize knows: it looks in `{}` for a folder with a CLAUDE.md or AGENTS.md, and `canon status` lists what it found",
+        "`{arg}` is not a project canonize knows: it looks in `{}` for a folder with a CLAUDE.md, AGENTS.md or other instructions file, and `canon status` lists what it found",
         dirs.join("`, `")
     )
 }
@@ -1313,10 +1839,16 @@ pub fn evict(args: EvictArgs) -> Result<i32> {
 pub fn move_it(args: MoveArgs) -> Result<i32> {
     let cfg = config::load()?;
     let (from, to) = targets(&cfg, &args.what, &args.to)?;
-    let (rename, repoints) = plan_move(&cfg, &from, &to)?;
+    workspaces::check_move(&cfg, &Projects::build(&cfg), &from, &to)?;
+    let (rename, mut repoints) = plan_move(&cfg, &from, &to)?;
+    let (before, after, left) = crate::mcp::moved_claude(&cfg, &from, &to);
     // The move runs first and alone: a repoint written after a rename that
     // failed would name a path nothing is at.
     if !rename.is_empty() {
+        let code = run_changes(before, args.dry_run, "");
+        if code != 0 {
+            return Ok(code);
+        }
         let code = run_changes(rename, args.dry_run, "");
         if code != 0 {
             return Ok(code);
@@ -1327,8 +1859,12 @@ pub fn move_it(args: MoveArgs) -> Result<i32> {
             format!("{} is already at {}", tilde(&from), tilde(&to)).dimmed()
         );
     }
+    for note in &left {
+        out!("{}", note.dimmed());
+    }
     // Repointing is worked out from what the files say now, so running the same
     // command again finishes a move that stopped halfway.
+    repoints.extend(after);
     let code = run_changes(repoints, args.dry_run, "nothing else named the old path");
     // The shortcut is repointed above, but an environment variable is the
     // user's shell, which nothing here can reach.
@@ -1349,16 +1885,40 @@ pub fn move_it(args: MoveArgs) -> Result<i32> {
 fn targets(cfg: &Config, what: &str, to: &str) -> Result<(PathBuf, PathBuf)> {
     let from = if what == "canon" {
         cfg.source.root.clone()
-    } else if what.starts_with('~') || what.starts_with('/') {
-        config::expand(what)
+    } else if let Some(p) = typed_path(what) {
+        p
     } else {
         cfg.source.root.join(what)
     };
-    let dest = if to.starts_with('~') || to.starts_with('/') {
-        config::expand(to)
-    } else {
+    let real = fs::canonicalize(&from).unwrap_or_else(|_| from.clone());
+    let in_canon = real.starts_with(&cfg.source.root) && real != cfg.source.root;
+    // A bare name is read inside the canon for what is in it, and beside it
+    // for anything else, the canon itself included, which is renamed where
+    // it is.
+    let dest = if let Some(p) = typed_path(to) {
+        p
+    } else if in_canon {
         cfg.source.root.join(to)
+    } else {
+        from.parent().unwrap_or(std::path::Path::new("/")).join(to)
     };
+    // Compared by real path, since the canon's root is kept as one.
+    let dest_real = fs::canonicalize(&dest).ok().or_else(|| {
+        let parent = fs::canonicalize(dest.parent()?).ok()?;
+        Some(parent.join(dest.file_name()?))
+    });
+    // The canon moved into itself is refused by `plan_move` in its own words.
+    if !in_canon
+        && real != cfg.source.root
+        && dest_real
+            .unwrap_or_else(|| dest.clone())
+            .starts_with(&cfg.source.root)
+    {
+        bail!(
+            "`{}` is not in your canon, so nothing was moved into it: name a folder outside it",
+            tilde(&from)
+        );
+    }
     let name = from
         .file_name()
         .map(|n| n.to_os_string())
@@ -1422,12 +1982,24 @@ fn plan_move(
 /// Everything that names `from`, rewritten to `to`: `@` imports, links into it,
 /// and the settings that spell a path out.
 fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Change> {
+    // What named `from` may name its real path instead (a workspace key is
+    // kept that way), and once it moved only its folder is left to resolve.
+    let real = fs::canonicalize(from).ok().or_else(|| {
+        let parent = fs::canonicalize(from.parent()?).ok()?;
+        Some(parent.join(from.file_name()?))
+    });
     let under = |p: &std::path::Path| -> Option<PathBuf> {
-        if p == from {
-            Some(to.to_path_buf())
-        } else {
-            p.strip_prefix(from).ok().map(|rest| to.join(rest))
-        }
+        [Some(from), real.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(|base| p.strip_prefix(base).ok())
+            .map(|rest| {
+                if rest.as_os_str().is_empty() {
+                    to.to_path_buf()
+                } else {
+                    to.join(rest)
+                }
+            })
     };
     // A file inside what moves is read where it was and written where it lands.
     let after = |p: &std::path::Path| under(p).unwrap_or_else(|| p.to_path_buf());
@@ -1438,11 +2010,13 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
         .filter(|a| a.active())
         .flat_map(|a| [a.rules.clone(), a.home.join(plan::CANON_FILE)])
         .collect();
-    for p in &Projects::build(cfg).list {
+    let projects = Projects::build(cfg);
+    for p in &projects.list {
         for name in ["CLAUDE.md", "AGENTS.md", plan::CANON_FILE] {
             files.push(p.root.join(name));
         }
     }
+    files.extend(cfg.workspaces.iter().map(|w| w.root.join(plan::CANON_FILE)));
     files.push(cfg.path.clone());
     files.sort();
     files.dedup();
@@ -1459,8 +2033,14 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
             continue;
         };
         let is_config = file == cfg.path;
+        let mut section = "";
         for line in text.lines().map(str::trim) {
-            let new = if is_config {
+            if let Some(name) = header(line) {
+                section = name;
+            }
+            let new = if is_config && section == "workspaces" {
+                workspace_line(line, &under)
+            } else if is_config {
                 setting(line, &cfg.source.root, &root_after, &under)
             } else {
                 line.strip_prefix('@')
@@ -1477,6 +2057,46 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
                 });
             }
         }
+    }
+
+    // A workspace's files name itself, its projects' files and their
+    // conventions by path.
+    let now = |p: &std::path::Path| {
+        if p.is_dir() {
+            p.to_path_buf()
+        } else {
+            after(p)
+        }
+    };
+    for w in &cfg.workspaces {
+        let mut moved = under(&w.root).is_some();
+        let mut gone = false;
+        let mut sections = Vec::new();
+        for p in &w.projects {
+            let mut conventions = workspaces::conventions(&projects, p);
+            if conventions.is_empty() {
+                conventions = workspaces::conventions(&projects, &after(p));
+            }
+            moved |= under(p).is_some() || conventions.iter().any(|c| under(c).is_some());
+            gone |= !(p.is_dir() || after(p).is_dir());
+            // In the canon's order once renamed, which is by path.
+            let mut conventions: Vec<PathBuf> = conventions.iter().map(|c| after(c)).collect();
+            conventions.sort();
+            let project = after(p);
+            let reads = workspaces::reads(&now(p), &project, &conventions);
+            sections.push((project, reads));
+        }
+        // With a project gone there is nothing to list for it, as in `fix`.
+        if !moved || gone {
+            continue;
+        }
+        let body = workspaces::body(&after(&w.root), &sections);
+        out.extend(workspaces::rewrites(
+            cfg,
+            &now(&w.root),
+            &after(&w.root),
+            &body,
+        ));
     }
 
     // opencode's `instructions` name house files by absolute path.
@@ -1536,6 +2156,80 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
         }
     }
     out
+}
+
+/// A path the user typed as one: from home or the root, or from the folder
+/// `canon` runs in; `None` for a bare name.
+fn typed_path(arg: &str) -> Option<PathBuf> {
+    if arg.starts_with('~') || arg.starts_with('/') {
+        Some(config::expand(arg))
+    } else if arg == "." || arg == ".." || arg.starts_with("./") || arg.starts_with("../") {
+        // Spelled out, since the path is written into files: `.` dropped and
+        // `..` taking off the folder before it.
+        let mut out = PathBuf::new();
+        for part in std::env::current_dir().ok()?.join(arg).components() {
+            match part {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    out.pop();
+                }
+                other => out.push(other),
+            }
+        }
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// The table a `[name]` line opens, a comment after it allowed.
+fn header(line: &str) -> Option<&str> {
+    let (name, rest) = line.strip_prefix('[')?.split_once(']')?;
+    let rest = rest.trim_start();
+    (rest.is_empty() || rest.starts_with('#')).then(|| name.trim())
+}
+
+/// A `[workspaces]` line with its folder and its projects each moved along,
+/// or nothing when none is in what moved. A comment after it stays, but a
+/// list written over several lines is not read here.
+fn workspace_line(
+    line: &str,
+    under: &impl Fn(&std::path::Path) -> Option<PathBuf>,
+) -> Option<String> {
+    let mut doc: toml_edit::DocumentMut = line.parse().ok()?;
+    let key = doc.iter().next()?.0.to_string();
+    let value = doc.get(&key)?.as_value()?.clone();
+    let moved = |s: &str| under(&config::expand(s)).map(|p| tilde(&p));
+    let mut new_value = match &value {
+        toml_edit::Value::String(s) => moved(s.value()).map(toml_edit::Value::from),
+        toml_edit::Value::Array(list) => {
+            let mut changed = false;
+            let mut out = toml_edit::Array::new();
+            for v in list {
+                let old = v.as_str()?;
+                match moved(old) {
+                    Some(new) => {
+                        changed = true;
+                        out.push(new);
+                    }
+                    None => out.push(old),
+                }
+            }
+            changed.then_some(toml_edit::Value::Array(out))
+        }
+        _ => None,
+    };
+    let new_key = under(&config::expand(&key));
+    if new_key.is_none() && new_value.is_none() {
+        return None;
+    }
+    let mut item = doc.remove(&key)?;
+    if let Some(v) = &mut new_value {
+        *v.decor_mut() = value.decor().clone();
+        item = toml_edit::Item::Value(v.clone());
+    }
+    doc.insert(&new_key.map_or(key, |k| tilde(&k)), item);
+    Some(doc.to_string().trim_end().to_string())
 }
 
 /// A `canonize.toml` line rewritten for the move, or nothing when it names
@@ -2022,5 +2716,16 @@ mod tests {
         )
         .expect("two paths");
         assert_eq!((from, to), (t.at("old-canon"), t.at("moved")));
+    }
+
+    #[test]
+    fn the_canon_renamed_to_a_bare_name_lands_beside_itself() {
+        let (t, cfg) = world();
+        let (from, to) = targets(&cfg, "canon", "canon2").expect("a rename of the canon");
+        assert_eq!(
+            (from, to),
+            (t.at("canon"), t.at("canon2")),
+            "a bare name is read inside the canon only for what is in it"
+        );
     }
 }

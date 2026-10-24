@@ -17,7 +17,7 @@ ENGINE="$(command -v podman || command -v docker || true)"
 IMAGE=localhost/canonize-render
 
 TAPES=("$@")
-[ ${#TAPES[@]} -gt 0 ] || TAPES=(setup agents skills projects shots move)
+[ ${#TAPES[@]} -gt 0 ] || TAPES=(setup agents skills projects workspaces shots move)
 
 (cd .. && cargo build --release)
 # The Dockerfile is the whole build context: nothing in this folder is copied in.
