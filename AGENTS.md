@@ -61,7 +61,7 @@ Working brief for an AI coding agent: the invariants, gotchas and decisions need
 
 ## Tests
 - No library target, so every test lives in a `#[cfg(test)] mod tests` beside the code, with `src/tmp.rs` (test-only) giving a self-deleting temp folder and hand-built `Config`/`Agent`/`Source` values. Nothing touches a real path, `HOME` is never set (it cannot be: `env::set_var` is unsafe in edition 2024 and `unsafe` is banned), so `setup::detect`/`lost` and the TUI are untested by design.
-- 79 tests cover the engines and the promises: config parsing and paths, the plan's states and changes, `check`, the project scan and CANON.md moves, setup detection and adopt, the CLAUDE.local.md wiring and Claude's approval, and the 0.2.0 surface (`repoint`, `plan_move`, `targets`, `set_key`, the rename and evict guards).
+- 80 tests cover the engines and the promises: config parsing and paths, the plan's states and changes, `check`, the project scan and CANON.md moves, setup detection and adopt, the CLAUDE.local.md wiring and Claude's approval, and the 0.2.0 surface (`repoint`, `plan_move`, `targets`, `set_key`, the rename and evict guards).
 
 ## Audit fixes (keep these true)
 - `import_cell` refuses a file that is a symlink into the canon, and `AddImport` refuses a symlink target: writing an import through the link would edit the rules file itself.
