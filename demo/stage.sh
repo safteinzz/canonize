@@ -127,6 +127,29 @@ up() {
 # rather than trusted.
 refuse() { echo "REFUSING to delete $STAGE: $1" >&2; exit 1; }
 
+# The mount points on $1 or under it, deepest first, one per line. /proc/mounts
+# writes a space, a tab, a newline and a backslash in a path as octal escapes,
+# and each path is compared as plain text, since as a regex any `(` or `.` in
+# the stage's path matched something else or nothing at all.
+mounts_under() {
+  awk -v s="$1" '
+    function decode(p,   out, i, c) {
+      out = ""
+      for (i = 1; i <= length(p); i++) {
+        c = substr(p, i, 1)
+        if (c == "\\" && substr(p, i + 1, 3) ~ /^[0-7][0-7][0-7]$/) {
+          out = out sprintf("%c", substr(p, i + 1, 1) * 64 + substr(p, i + 2, 1) * 8 + substr(p, i + 3, 1))
+          i += 3
+        } else {
+          out = out c
+        }
+      }
+      return out
+    }
+    { p = decode($2); if (p == s || index(p, s "/") == 1) print length(p) "\t" p }' /proc/mounts |
+    sort -rn | cut -f2-
+}
+
 assert_safe_to_delete() {
   case "$STAGE" in
     /*) ;;
@@ -146,18 +169,20 @@ assert_safe_to_delete() {
   esac
   # The real gate: only ever delete a tree this script built and stamped.
   [ -f "$real/$MARKER" ] || refuse "no \`$MARKER\` in it, so this script did not build it"
-  # Unmount anything under it, longest path first, then check again: a recursive
-  # delete walks straight through a mountpoint and removes the far side.
+  # Unmount anything on it or under it, longest path first, then check again: a
+  # recursive delete walks straight through a mountpoint and removes the far side.
   local mp
-  while read -r mp; do
+  while IFS= read -r mp; do
     [ -n "$mp" ] || continue
     echo "unmounting $mp"
     fusermount -u "$mp" 2> /dev/null || umount "$mp" 2> /dev/null || true
-  done < <(awk -v s="$real/" '$2 ~ "^"s {print length($2), $2}' /proc/mounts |
-             sort -rn | cut -d' ' -f2-)
-  if awk -v s="$real/" '$2 ~ "^"s {found=1} END {exit !found}' /proc/mounts; then
-    refuse "something is still mounted under it; unmount it by hand and rerun"
+  done < <(mounts_under "$real")
+  if [ -n "$(mounts_under "$real")" ]; then
+    refuse "something is still mounted on it or under it; unmount it by hand and rerun"
   fi
+  # A mount taken off the stage itself uncovers the folder underneath, which
+  # has to carry the marker on its own.
+  [ -f "$real/$MARKER" ] || refuse "no \`$MARKER\` in it once unmounted, so this script did not build what is left"
 }
 
 down_quiet() {
