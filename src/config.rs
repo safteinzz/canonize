@@ -973,7 +973,7 @@ mod tests {
         let cfg = load_from(t.path()).expect("a 0.4 file should still load");
         assert_eq!(
             cfg.scopes,
-            [dev.clone()],
+            std::slice::from_ref(&dev),
             "before 0.5.0 `projects` named the folders to look through"
         );
         assert!(cfg.projects.is_empty());
