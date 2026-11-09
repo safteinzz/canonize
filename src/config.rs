@@ -984,8 +984,16 @@ mod tests {
 
         set_project(&cfg.path, &app.display().to_string(), true).expect("it should write");
         let cfg = load_from(t.path()).expect("it should still load");
-        assert_eq!(cfg.scopes, [dev], "the rename keeps the folders to look through");
-        assert_eq!(cfg.projects, [app], "the project went under the new `projects`");
+        assert_eq!(
+            cfg.scopes,
+            [dev],
+            "the rename keeps the folders to look through"
+        );
+        assert_eq!(
+            cfg.projects,
+            [app],
+            "the project went under the new `projects`"
+        );
         assert!(!cfg.legacy_projects);
     }
 
