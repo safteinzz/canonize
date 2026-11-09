@@ -224,6 +224,19 @@ pub enum Change {
         key: String,
         projects: Option<Vec<String>>,
     },
+    /// Name a folder a project under `projects` in canonize.toml, or forget it
+    /// with `keep` false. Nothing in the folder changes.
+    Project {
+        config: PathBuf,
+        path: String,
+        keep: bool,
+    },
+    /// Rename a setting in canonize.toml, keeping its value and comments.
+    RenameSetting {
+        config: PathBuf,
+        from: String,
+        to: String,
+    },
     /// Take an MCP server out of one agent's config; `in_project` when the
     /// file is a project's, whose folder (`.codex/`, `.pi/`) goes if emptied.
     McpRemove {
@@ -260,6 +273,8 @@ impl Change {
             }
             Change::McpUndefine { file, name, .. } => (file, name),
             Change::Workspace { config, key, .. } => (config, key),
+            Change::Project { config, path, .. } => (config, path),
+            Change::RenameSetting { config, from, .. } => (config, from),
         }
     }
 
@@ -302,6 +317,9 @@ impl Change {
                 projects: Some(_), ..
             } => "link",
             Change::Workspace { projects: None, .. } => "unlink",
+            Change::Project { keep: true, .. } => "add project",
+            Change::Project { keep: false, .. } => "forget",
+            Change::RenameSetting { .. } => "rename",
         }
     }
 
@@ -376,6 +394,19 @@ impl Change {
                 key,
                 projects: None,
             } => format!("forget workspace {key} in {}", tilde(config)),
+            Change::Project {
+                config,
+                path,
+                keep: true,
+            } => format!("add project {path} to {}", tilde(config)),
+            Change::Project {
+                config,
+                path,
+                keep: false,
+            } => format!("forget project {path} in {}", tilde(config)),
+            Change::RenameSetting { config, from, to } => {
+                format!("rename `{from}` to `{to}` in {}", tilde(config))
+            }
         }
     }
 
@@ -467,6 +498,20 @@ impl Change {
                 key,
                 projects: None,
             } => format!("# delete \"{key}\" from [workspaces] in {}", tilde(config)),
+            Change::Project {
+                config,
+                path,
+                keep: true,
+            } => format!("# in {}: projects = [..., \"{path}\"]", tilde(config)),
+            Change::Project {
+                config,
+                path,
+                keep: false,
+            } => format!("# delete \"{path}\" from projects in {}", tilde(config)),
+            Change::RenameSetting { config, from, to } => format!(
+                "# in {}: {from} = [...] becomes {to} = [...]",
+                tilde(config)
+            ),
         }
     }
 
@@ -486,6 +531,8 @@ impl Change {
                 key,
                 projects,
             } => config::set_workspace(config, key, projects.as_deref()),
+            Change::Project { config, path, keep } => config::set_project(config, path, *keep),
+            Change::RenameSetting { config, from, to } => config::rename_key(config, from, to),
             Change::Link { at, to } => {
                 if let Some(parent) = at.parent() {
                     fs::create_dir_all(parent)
@@ -731,6 +778,12 @@ fn json_instruction(file: &Path, value: &str, add: bool) -> Result<()> {
     } else {
         list.retain(|v| v.as_str() != Some(value));
     }
+    // A file left holding nothing but an empty list is the shell written
+    // when there was none, so it goes with its last entry.
+    if !add && list.is_empty() && obj.len() == 1 {
+        return fs::remove_file(file)
+            .with_context(|| format!("could not delete `{}`", tilde(file)));
+    }
     if let Some(parent) = file.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("could not create `{}`", tilde(parent)))?;
@@ -798,7 +851,7 @@ impl Plan {
             .map(|n| Row::Rules(n.to_string_lossy().into_owned()))
             .into_iter()
             .collect();
-        let loader = !cfg.projects.is_empty();
+        let loader = cfg.has_projects();
         if loader {
             rows.push(Row::Loader);
         }

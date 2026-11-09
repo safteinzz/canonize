@@ -50,6 +50,13 @@ pub fn run(source: &Source) -> Report {
             ),
         });
     }
+    let rules_file = &source.workspace_rules;
+    if !rules_file.as_os_str().is_empty() && !rules_file.is_file() {
+        problems.push(format!(
+            "{}: missing, so the agents in every workspace are told to read a file that is not there: write it, or set `workspaces = \"\"` under `[source]`",
+            tilde(rules_file)
+        ));
+    }
     // Where tokens are kept matters to the agents, not to whether it is valid.
     let mcp = match crate::mcp::load(&source.mcp, std::path::Path::new("")) {
         Ok(servers) => servers.len(),

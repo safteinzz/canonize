@@ -12,12 +12,15 @@ use super::alert::render_note;
 use super::confirm::render_confirm;
 use super::line_edit;
 use super::link_form::render_link_form;
+use super::project_form::render_project_form;
+use super::project_tab::ProjRow;
 use super::scope::render_scope;
 use super::server_form::render_server_form;
 use super::typed::render_typed;
 use super::widgets::*;
 use super::wizard::render_wizard;
 use super::workspaces::SpaceLine;
+use super::workspaces::file_name;
 use super::{App, HouseRow, View};
 use crate::config::{RulesMode, SkillsMode, tilde};
 use crate::plan::{self, State};
@@ -33,6 +36,7 @@ const CARD_KEYS: &[&str] = &["↵ fix", FIX_ALL, DEL, BACK, REFRESH, QUIT];
 const SKILL_KEYS: &[&str] = &[ON_OFF, ADD, FIX_ALL, DEL, FIND, REFRESH, QUIT];
 const SPACE_KEYS: &[&str] = &["↵ open", "f fix", FIX_ALL, CREATE, DEL, FIND, REFRESH, QUIT];
 const UNSET_KEYS: &[&str] = &["s set up", QUIT];
+const BROKEN_KEYS: &[&str] = &["E edit", REFRESH, QUIT];
 
 pub(super) fn ui(f: &mut Frame, app: &App) {
     let screen = f.area();
@@ -59,20 +63,26 @@ pub(super) fn ui(f: &mut Frame, app: &App) {
     render_source(f, chunks[0], app);
     match &app.load_error {
         Some(e) => {
-            let mut lines = vec![Line::raw(
-                "canonize is not set up yet: press s to set it up.",
-            )];
+            let unset = app.unset();
+            let mut lines = vec![Line::raw(if unset {
+                "canonize is not set up yet: press s to set it up."
+            } else {
+                "canonize.toml does not load, so there is nothing to show: E opens it, and r reads it again."
+            })];
             // The reason is for someone who quit the wizard; while it is up it
             // would only be noise behind it.
             if app.wizard.is_none() {
                 lines.push(Line::raw(""));
-                lines.push(Line::styled(
-                    e.clone(),
-                    Style::default().add_modifier(Modifier::DIM),
-                ));
+                let dim = Style::default().add_modifier(Modifier::DIM);
+                lines.extend(e.lines().map(|l| Line::styled(l.to_string(), dim)));
             }
+            let title = if unset {
+                " welcome "
+            } else {
+                " canonize.toml "
+            };
             let para = Paragraph::new(lines)
-                .block(Block::default().borders(Borders::ALL).title(" welcome "))
+                .block(Block::default().borders(Borders::ALL).title(title))
                 .wrap(Wrap { trim: false });
             f.render_widget(para, chunks[1]);
         }
@@ -80,6 +90,7 @@ pub(super) fn ui(f: &mut Frame, app: &App) {
         None if app.view == View::Houses => render_houses(f, chunks[1], app),
         None if app.view == View::Mcp => render_mcp(f, chunks[1], app),
         None if app.view == View::Workspaces => render_workspaces(f, chunks[1], app),
+        None if app.view == View::Projects => render_projects(f, chunks[1], app),
         None => render_agents(f, chunks[1], app),
     }
     render_status(f, chunks[3], app);
@@ -95,6 +106,9 @@ pub(super) fn ui(f: &mut Frame, app: &App) {
     }
     if let Some(form) = &app.link_form {
         render_link_form(f, area, form);
+    }
+    if let Some(form) = &app.project_form {
+        render_project_form(f, area, form);
     }
     if let Some(c) = &app.confirm {
         render_confirm(f, area, c);
@@ -137,17 +151,19 @@ fn render_source(f: &mut Frame, area: Rect, app: &App) {
         .title(" canonize · canon ");
     let inner = block.inner(area);
     f.render_widget(block, area);
-    let cols = Layout::horizontal([Constraint::Length(55), Constraint::Min(0)]).split(inner);
+    let cols = Layout::horizontal([Constraint::Length(66), Constraint::Min(0)]).split(inner);
     let idx = match app.view {
         View::Agents => 0,
         View::Skills => 1,
-        View::Houses => 2,
-        View::Workspaces => 3,
-        View::Mcp => 4,
+        View::Projects => 2,
+        View::Houses => 3,
+        View::Workspaces => 4,
+        View::Mcp => 5,
     };
     let tabs = Tabs::new(vec![
         "Agents",
         "Skills",
+        "Projects",
         "Conventions",
         "Workspaces",
         "MCPs",
@@ -196,6 +212,8 @@ fn render_agents(f: &mut Frame, area: Rect, app: &App) {
     };
     let dim = Style::default().add_modifier(Modifier::DIM);
     let cols = Layout::horizontal([Constraint::Length(26), Constraint::Min(0)]).split(area);
+    // Neither pane scrolls, so a page is the pane.
+    app.page.set(usize::from(area.height.saturating_sub(2)));
 
     let shown = app.agent_rows();
     let items: Vec<Line> = shown
@@ -210,12 +228,10 @@ fn render_agents(f: &mut Frame, area: Rect, app: &App) {
             } else {
                 ("●", Color::Green)
             };
-            let name = if !a.installed() {
-                format!("{} (not installed)", a.name)
-            } else if !a.enabled {
-                format!("{} (disabled)", a.name)
-            } else {
+            let name = if a.enabled {
                 a.name.clone()
+            } else {
+                format!("{} (disabled)", a.name)
             };
             let mut style = if a.active() { Style::default() } else { dim };
             if i == app.col {
@@ -351,13 +367,12 @@ fn render_skills(f: &mut Frame, area: Rect, app: &App) {
 
     let mut header = vec![Cell::from("")];
     let mut widths = vec![Constraint::Length(label_w + 1)];
-    for a in &cfg.agents {
-        let text = if !a.installed() {
-            format!("{} (not installed)", a.name)
-        } else if !a.enabled {
-            format!("{} (disabled)", a.name)
-        } else {
+    let shown = app.installed_agents();
+    for a in shown.iter().map(|&i| &cfg.agents[i]) {
+        let text = if a.enabled {
             a.name.clone()
+        } else {
+            format!("{} (disabled)", a.name)
         };
         let style = if a.active() {
             Style::default().add_modifier(Modifier::BOLD)
@@ -371,7 +386,8 @@ fn render_skills(f: &mut Frame, area: Rect, app: &App) {
     let mut rows: Vec<Row> = Vec::new();
     for (n, r) in rows_idx.iter().enumerate() {
         let mut cells = vec![Cell::from(plan.rows[*r].label())];
-        for (c, cell) in plan.cells[*r].iter().enumerate() {
+        for &c in &shown {
+            let cell = &plan.cells[*r][c];
             let mut style = state_style(&cell.state);
             if app.srow == n && app.col == c {
                 style = style.add_modifier(Modifier::REVERSED);
@@ -384,13 +400,14 @@ fn render_skills(f: &mut Frame, area: Rect, app: &App) {
     let table = Table::new(rows, widths)
         .header(Row::new(header).bottom_margin(1))
         .block(block);
-    render_grid(f, area, table, 2, total, app.srow, &app.stop);
+    app.page
+        .set(render_grid(f, area, table, 2, total, app.srow, &app.stop));
 }
 
 /// Draws a grid scrolled so the `selected` row is on screen, starting from
 /// `top` and writing back where it ended up, with a scrollbar on the right
 /// border whenever some of the `total` rows are out of sight. `header_h` is
-/// the rows the table's header takes, its margin included.
+/// the rows the table's header takes, its margin included. It says how many rows it showed.
 fn render_grid(
     f: &mut Frame,
     area: Rect,
@@ -399,7 +416,7 @@ fn render_grid(
     total: usize,
     selected: usize,
     top: &Kept<usize>,
-) {
+) -> usize {
     let mut state = TableState::new()
         .with_offset(top.get())
         .with_selected(Some(selected));
@@ -413,6 +430,7 @@ fn render_grid(
         ..area
     };
     vscrollbar(f, rows, total, state.offset(), viewport);
+    viewport
 }
 
 /// A detail pane's title and body, built before the frame is laid out so the
@@ -466,6 +484,14 @@ fn detail_pane(app: &App, width: u16) -> Option<(Pane, u16)> {
             .filter_map(|(r, c)| pane(r, c))
             .collect();
         return Some((pane(app.house_row()?, app.pcol)?, tallest(all)));
+    }
+    if app.view == View::Projects {
+        let all = app
+            .all_proj_rows()
+            .into_iter()
+            .filter_map(|r| proj_detail(app, r))
+            .collect();
+        return Some((proj_detail(app, app.proj_row()?)?, tallest(all)));
     }
     if app.view == View::Workspaces {
         let n = app.spaces.as_ref()?.list.len();
@@ -615,12 +641,7 @@ fn detail(app: &App, row: Option<usize>, col: usize) -> Option<Pane> {
             lines.push(field(&format!("d {}", u.verb()), u.describe()));
         }
     }
-    if !agent.installed() {
-        lines.push(Line::styled(
-            format!("not installed: {} does not exist", tilde(&agent.home)),
-            dim,
-        ));
-    } else if !agent.enabled {
+    if !agent.enabled {
         lines.push(Line::styled("disabled in canonize.toml", dim));
     }
     Some(Pane { title, lines })
@@ -657,10 +678,13 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         } else {
             Color::Green
         };
-        f.render_widget(
-            Paragraph::new(format!(" {msg}")).style(Style::default().fg(colour)),
-            area,
-        );
+        // A job keeps its mark in front, so it never looks finished early.
+        let mut spans = Vec::new();
+        if let Some(j) = &app.job {
+            spans.push(Span::styled(format!(" {}{SEP}", j.footer()), dim));
+        }
+        spans.push(Span::styled(format!(" {msg}"), Style::default().fg(colour)));
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
     // `o open` only where the row has a file to open.
@@ -674,15 +698,18 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         keys.extend([DEL, FIND, REFRESH, QUIT]);
         keys
     };
-    let keys: Vec<&str> = if app.load_error.is_some() {
+    let keys: Vec<&str> = if app.unset() {
         UNSET_KEYS.to_vec()
+    } else if app.load_error.is_some() {
+        BROKEN_KEYS.to_vec()
     } else if app.view == View::Houses {
         let file = match app.house_row() {
             Some(HouseRow::Project(i)) => app
                 .projects
                 .as_ref()
                 .and_then(|p| p.list.get(i))
-                .map(|x| x.host.clone()),
+                .map(|x| x.host.clone())
+                .filter(|host| host.is_file()),
             Some(HouseRow::Agent(a)) => app
                 .houses
                 .as_ref()
@@ -692,6 +719,18 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             None => None,
         };
         with_open(file, &[])
+    } else if app.view == View::Projects {
+        // Enter is the row's verb, and a project found by its own file has none.
+        let mut keys: Vec<&str> = app.proj_enter().into_iter().collect();
+        keys.push(ADD);
+        if app.project_file().is_some() {
+            keys.push(OPEN);
+        }
+        if app.cfg.as_ref().is_some_and(|c| c.legacy_projects) {
+            keys.push(FIX_ALL);
+        }
+        keys.extend([DEL, FIND, REFRESH, QUIT]);
+        keys
     } else if app.view == View::Mcp {
         let file = match app.house_row_at(app.mrow) {
             Some(HouseRow::Agent(a)) => app
@@ -710,12 +749,17 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         // only says which keys act there.
         let mut keys = match app.space_line() {
             Some(SpaceLine::File(_)) => vec!["↵ fix"],
-            Some(SpaceLine::Context) => vec!["↵ open"],
+            Some(SpaceLine::Context | SpaceLine::Rules) => vec!["↵ open"],
             Some(SpaceLine::Convention(_) | SpaceLine::Server(_)) => vec![ON_OFF],
             Some(SpaceLine::Project(_)) | None => Vec::new(),
         };
         keys.push(ADD);
-        if app.space_file_at().is_some() && app.space_line() != Some(SpaceLine::Context) {
+        if app.space_file_at().is_some()
+            && !matches!(
+                app.space_line(),
+                Some(SpaceLine::Context | SpaceLine::Rules)
+            )
+        {
             keys.push(OPEN);
         }
         keys.extend([FIX_ALL, DEL, BACK, REFRESH, QUIT]);
@@ -731,10 +775,10 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     };
     // A committed filter stays in front of the keys: rows are hidden, and
     // nothing else on screen would say why.
-    let lead = match app.query.is_empty() || app.in_card || app.in_space {
-        true => Vec::new(),
-        false => vec![format!("/{}", app.query), BACK.to_string()],
-    };
+    let mut lead: Vec<String> = app.job.iter().map(|j| j.footer()).collect();
+    if !(app.query.is_empty() || app.in_card || app.in_space) {
+        lead.extend([format!("/{}", app.query), BACK.to_string()]);
+    }
     f.render_widget(Paragraph::new(key_footer(&lead, &keys, area.width)), area);
 }
 
@@ -743,13 +787,15 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
 type HelpSection = (&'static str, &'static [(&'static str, &'static str)]);
 
 /// Every key the app answers to, grouped by where it works. The panel scrolls,
-/// so a new row costs nothing but its line.
+/// so a new row costs nothing but its line, and shows one screen's group over
+/// the shared ones, so a new screen's group goes in `SCREEN_GROUPS` too.
 const HELP: &[HelpSection] = &[
     (
         "moving",
         &[
             ("j/k ↑↓", "move a row"),
             ("h/l ←→", "move a column"),
+            ("ctrl-d ctrl-u", "half a page down, up"),
             ("g G home end", "the first, last row"),
             ("tab shift-tab", "the next, previous tab"),
             ("space", "the same as ↵ in a grid"),
@@ -786,6 +832,24 @@ const HELP: &[HelpSection] = &[
             ("a", "add"),
             ("d", "delete"),
             ("F", "fix all"),
+        ],
+    ),
+    (
+        "projects",
+        &[
+            ("↵", "add a folder as a project, or forget one you added"),
+            ("a", "add a folder anywhere as a project"),
+            ("o", "open its instructions file"),
+            ("d", "forget a project you added"),
+            ("ctrl-o", "pick a folder under your scopes, in the form"),
+            (
+                "",
+                "found: it has its own instructions file · added: you added it",
+            ),
+            (
+                "",
+                "gone: you added it, but it is not on this machine · -: not a project yet",
+            ),
         ],
     ),
     (
@@ -893,12 +957,31 @@ const HELP: &[HelpSection] = &[
     ),
 ];
 
+/// The groups of `HELP` that are one screen's; every other group holds on
+/// every screen.
+const SCREEN_GROUPS: &[&str] = &[
+    "agents",
+    "in an agent's card",
+    "skills",
+    "projects",
+    "conventions",
+    "workspaces",
+    "in a workspace's card",
+    "mcps",
+    "in set up",
+];
+
 /// The width of the key column, so every description starts in one place.
 const HELP_KEYS: usize = 16;
 
-pub(super) fn help_lines() -> Vec<Line<'static>> {
+/// The help for the screen whose group is `group`: that group first, then
+/// the ones every screen shares, never another screen's, whose keys cannot
+/// be pressed from here.
+pub(super) fn help_lines(group: &str) -> Vec<Line<'static>> {
+    let own = HELP.iter().filter(|(s, _)| *s == group);
+    let shared = HELP.iter().filter(|(s, _)| !SCREEN_GROUPS.contains(s));
     let mut lines = Vec::new();
-    for (section, entries) in HELP {
+    for (section, entries) in own.chain(shared) {
         if !lines.is_empty() {
             lines.push(Line::raw(""));
         }
@@ -931,7 +1014,7 @@ pub(super) fn help_lines() -> Vec<Line<'static>> {
 /// The help reader: the body scrolls under a key row that never moves, with a
 /// scrollbar on the right border once it is taller than the box.
 fn render_help(f: &mut Frame, area: Rect, app: &App) {
-    let lines = help_lines();
+    let lines = help_lines(app.help_group());
     let width = box_width(area.width);
     // The body, then a blank and the key row.
     let rect = box_area(area, width, box_height(lines.len() as u16 + 2, area.height));
@@ -1069,6 +1152,241 @@ fn render_mcp(f: &mut Frame, area: Rect, app: &App) {
 /// The workspaces tab: a list of folders linked to projects, and the card of
 /// the selected one, a line per file canonize writes there, project, its
 /// CONTEXT.md, convention and MCP server.
+/// The projects tab: under each scope, every project and every folder
+/// directly inside it, then the projects added from elsewhere.
+fn render_projects(f: &mut Frame, area: Rect, app: &App) {
+    let Some(cfg) = &app.cfg else {
+        return;
+    };
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let block = Block::default().borders(Borders::ALL).title(" projects ");
+    let all = app.all_proj_rows();
+    if all.is_empty() && cfg.scopes.is_empty() {
+        let para = Paragraph::new(
+            "No projects yet: a adds a folder as one, or `scopes = [\"~/dev\"]` in canonize.toml (E) lists every folder under it here, so ↵ adds one as a project.",
+        )
+        .style(dim)
+        .block(block)
+        .wrap(Wrap { trim: false });
+        f.render_widget(para, area);
+        return;
+    }
+    // Sized from every row, so typing a filter never shifts the notes.
+    let name_w = all
+        .iter()
+        .map(|&r| app.proj_name(r).chars().count())
+        .max()
+        .unwrap_or(0)
+        .clamp(8, 48);
+    let rows = app.proj_rows();
+    let mut lines = Vec::new();
+    // The selected row's line, since the headings push the rows down.
+    let mut at = 0;
+    let mut n = 0;
+    for g in 0..=cfg.scopes.len() {
+        let members: Vec<ProjRow> = rows
+            .iter()
+            .copied()
+            .filter(|&r| app.proj_group(r) == g)
+            .collect();
+        let scope = cfg.scopes.get(g);
+        if scope.is_none() && members.is_empty() {
+            continue;
+        }
+        if !lines.is_empty() {
+            lines.push(Line::raw(""));
+        }
+        match scope {
+            Some(s) if !s.is_dir() => {
+                lines.push(Line::from(vec![
+                    Span::styled(tilde(s), dim),
+                    Span::styled(" not a folder", Style::default().fg(Color::Yellow)),
+                ]));
+                lines.push(Line::styled(
+                    "  `canon config set scopes <DIR>...` lists the folders to look through, or E edits them",
+                    dim,
+                ));
+                continue;
+            }
+            Some(s) => lines.push(Line::styled(tilde(s), dim)),
+            None => lines.push(Line::styled("elsewhere", dim)),
+        }
+        if members.is_empty() {
+            lines.push(Line::styled("  no folder inside it", dim));
+            continue;
+        }
+        for r in members {
+            if n == app.jrow {
+                at = lines.len();
+            }
+            n += 1;
+            let (word, style, note) = proj_look(app, r);
+            let mut name = if matches!(r, ProjRow::Folder(_)) {
+                dim
+            } else {
+                Style::default()
+            };
+            if at == lines.len() && n == app.jrow + 1 {
+                name = name.add_modifier(Modifier::REVERSED);
+            }
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {word:<6} "), style),
+                Span::styled(format!("{:<name_w$}", app.proj_name(r)), name),
+                Span::styled(format!("  {note}"), dim),
+            ]));
+        }
+    }
+    app.page
+        .set(render_scrolled(f, area, lines, block, at, &app.jtop));
+}
+
+/// A projects tab row's word, its colour and why.
+fn proj_look(app: &App, r: ProjRow) -> (&'static str, Style, String) {
+    let green = Style::default().fg(Color::Green);
+    let Some(p) = &app.projects else {
+        return ("", Style::default(), String::new());
+    };
+    match r {
+        ProjRow::Project(i) => {
+            let x = &p.list[i];
+            let marker = file_name(&x.host);
+            match (x.listed, &x.scope) {
+                (true, Some(_)) => (
+                    "added",
+                    green,
+                    format!("you added it, and it has its own {marker}"),
+                ),
+                (true, None) => (
+                    "added",
+                    green,
+                    "you added it, and it has no instructions file".to_string(),
+                ),
+                (false, _) => ("found", green, format!("it has its own {marker}")),
+            }
+        }
+        ProjRow::Gone(_) => (
+            "gone",
+            Style::default().fg(Color::Yellow),
+            "you added it, but it is not on this machine".to_string(),
+        ),
+        ProjRow::Folder(_) => (
+            "-",
+            Style::default().add_modifier(Modifier::DIM),
+            "not a project yet".to_string(),
+        ),
+    }
+}
+
+/// A projects tab row spelled out: what makes it a project or not, where it
+/// is used, and what Enter does.
+fn proj_detail(app: &App, r: ProjRow) -> Option<Pane> {
+    let (cfg, p) = (app.cfg.as_ref()?, app.projects.as_ref()?);
+    let path = app.proj_path(r)?;
+    let dim = Style::default().add_modifier(Modifier::DIM);
+    let field =
+        |k: &str, v: String| Line::from(vec![Span::styled(format!("{k:<17}"), dim), Span::raw(v)]);
+    let mut lines = vec![field("folder", tilde(path))];
+    match r {
+        ProjRow::Project(i) => {
+            let x = &p.list[i];
+            let marker = file_name(&x.host);
+            lines.push(field(
+                "a project",
+                match (x.listed, &x.scope) {
+                    (true, Some(s)) => format!(
+                        "yes: you added it, and it was found under {} with its own {marker}",
+                        tilde(s)
+                    ),
+                    (true, None) => {
+                        "yes: you added it, so it is listed in canonize.toml".to_string()
+                    }
+                    (false, Some(s)) => {
+                        format!("yes: found under {} with its own {marker}", tilde(s))
+                    }
+                    (false, None) => format!("yes: it has its own {marker}"),
+                },
+            ));
+            let imports: Vec<String> = p
+                .house
+                .iter()
+                .zip(&x.cells)
+                .filter(|(_, c)| matches!(c.state, State::Linked | State::Broken(_)))
+                .map(|(h, _)| crate::cli::house_label(h))
+                .collect();
+            lines.push(field(
+                "conventions",
+                if imports.is_empty() {
+                    "none yet: the Conventions tab adds one".to_string()
+                } else {
+                    imports.join(", ")
+                },
+            ));
+            let spaces: Vec<String> = cfg
+                .workspaces
+                .iter()
+                .filter(|w| {
+                    w.projects
+                        .iter()
+                        .any(|q| crate::workspaces::same(q, &x.root))
+                })
+                .map(|w| tilde(&w.root))
+                .collect();
+            if !spaces.is_empty() {
+                lines.push(field("workspaces", spaces.join(", ")));
+            }
+            lines.push(field(
+                "o opens",
+                if x.host.is_file() {
+                    tilde(&x.host)
+                } else {
+                    "nothing: it has no instructions file".to_string()
+                },
+            ));
+            lines.push(if x.listed {
+                field(
+                    "↵ d forget",
+                    "take it out of canonize.toml, and nothing in the folder changes".to_string(),
+                )
+            } else {
+                field(
+                    "↵",
+                    format!("nothing: it is a project while its {marker} is there"),
+                )
+            });
+        }
+        ProjRow::Gone(_) => {
+            lines.push(field(
+                "a project",
+                "you added it, but it is not on this machine".to_string(),
+            ));
+            lines.push(field(
+                "↵ d forget",
+                "take it out of canonize.toml".to_string(),
+            ));
+        }
+        ProjRow::Folder(_) => {
+            lines.push(field(
+                "a project",
+                "no: it has no instructions file and you have not added it".to_string(),
+            ));
+            lines.push(field(
+                "↵ add",
+                "list it in canonize.toml, and write nothing in the folder".to_string(),
+            ));
+        }
+    }
+    if cfg.legacy_projects {
+        lines.push(Line::styled(
+            "canonize.toml still says `projects` for the folders to look through: F renames it to `scopes`",
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    Some(Pane {
+        title: format!(" {} ", app.proj_name(r)),
+        lines,
+    })
+}
+
 fn render_workspaces(f: &mut Frame, area: Rect, app: &App) {
     let (Some(s), Some(m)) = (&app.spaces, &app.mcps) else {
         return;
@@ -1128,7 +1446,7 @@ fn render_workspaces(f: &mut Frame, area: Rect, app: &App) {
             ])
         })
         .collect();
-    render_scrolled(
+    let shown = render_scrolled(
         f,
         cols[0],
         items,
@@ -1136,6 +1454,9 @@ fn render_workspaces(f: &mut Frame, area: Rect, app: &App) {
         app.wrow,
         &app.wtop,
     );
+    if !app.in_space {
+        app.page.set(shown);
+    }
 
     let Some(i) = app.space() else {
         return;
@@ -1174,7 +1495,7 @@ fn render_workspaces(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let title = format!(" {} ", tilde(&s.list[i].root));
-    render_scrolled(
+    let shown = render_scrolled(
         f,
         cols[1],
         lines,
@@ -1182,10 +1503,13 @@ fn render_workspaces(f: &mut Frame, area: Rect, app: &App) {
         app.sline,
         &app.ctop,
     );
+    if app.in_space {
+        app.page.set(shown);
+    }
 }
 
 /// `lines` in a frame, scrolled so line `at` is on screen, starting from `top`
-/// and writing back where it ended up, with a scrollbar once they do not fit.
+/// and writing back where it ended up, with a scrollbar once they do not fit. It says how many rows it showed.
 fn render_scrolled(
     f: &mut Frame,
     area: Rect,
@@ -1193,7 +1517,7 @@ fn render_scrolled(
     block: Block,
     at: usize,
     top: &Kept<usize>,
-) {
+) -> usize {
     let shown = area.height.saturating_sub(2) as usize;
     let mut first = top.get().min(at);
     if shown > 0 && at >= first + shown {
@@ -1209,6 +1533,7 @@ fn render_scrolled(
     if total > shown {
         vscrollbar(f, area, total, first, shown);
     }
+    shown
 }
 
 /// One line of a workspace's card as the card shows it.
@@ -1257,6 +1582,25 @@ fn space_row(app: &App, i: usize, line: SpaceLine) -> Option<SpaceRow> {
                     format!("{} is not there", tilde(root))
                 } else {
                     tilde(root)
+                },
+            }
+        }
+        SpaceLine::Rules => {
+            let file = crate::workspaces::rules(cfg)?;
+            let there = file.is_file();
+            SpaceRow {
+                group: "workspace",
+                name: super::workspaces::file_name(file),
+                word: if there { "there" } else { "missing" }.to_string(),
+                style: if there {
+                    green
+                } else {
+                    Style::default().fg(Color::Yellow)
+                },
+                note: if there {
+                    "what every workspace follows: o opens it".to_string()
+                } else {
+                    "missing: write it, or set workspaces = \"\" (E)".to_string()
                 },
             }
         }
@@ -1396,7 +1740,8 @@ fn space_detail(app: &App, i: usize) -> Option<Pane> {
     }
     lines.push(field(
         "↵ open",
-        "its card: files, CONTEXT.md, projects, conventions, MCP servers".to_string(),
+        "its card: files, CONTEXT.md, workspaces.md, projects, conventions, MCP servers"
+            .to_string(),
     ));
     let fixes = plan::dedup(e.fixes(None).into_iter().chain(m.space_fixes(i)));
     if fixes.is_empty() {
@@ -1474,7 +1819,14 @@ fn line_detail(app: &App, i: usize, line: SpaceLine) -> Option<Pane> {
                 },
             )];
             if let Some(x) = p.list.iter().find(|x| x.root == *at) {
-                lines.push(field("o opens", tilde(&x.host)));
+                lines.push(field(
+                    "o opens",
+                    if x.host.is_file() {
+                        tilde(&x.host)
+                    } else {
+                        "nothing: it has no instructions file".to_string()
+                    },
+                ));
             }
             lines.push(field("a", "add another project".to_string()));
             lines.push(field(
@@ -1505,6 +1857,25 @@ fn line_detail(app: &App, i: usize, line: SpaceLine) -> Option<Pane> {
                 ),
             ];
             (crate::workspaces::CONTEXT_FILE.to_string(), lines)
+        }
+        SpaceLine::Rules => {
+            let file = crate::workspaces::rules(cfg)?;
+            let lines = vec![
+                field(
+                    "file",
+                    if file.is_file() {
+                        tilde(file)
+                    } else {
+                        format!("{}, missing", tilde(file))
+                    },
+                ),
+                field("↵ o", "open it in $EDITOR".to_string()),
+                Line::styled(
+                    "Your canon's rules for every workspace: the files canonize writes at each workspace's top tell its agents to read it first. canonize never writes it.",
+                    dim,
+                ),
+            ];
+            (super::workspaces::file_name(file), lines)
         }
         SpaceLine::Convention(c) => {
             let cell = e.own.cells.get(c)?;
@@ -1700,17 +2071,18 @@ fn render_places(
     }
     if p.list.is_empty() {
         rows.push(section(""));
-        rows.push(section(if cfg.projects.is_empty() {
-            "projects: none yet, add `projects = [\"~/dev\"]` to canonize.toml (E)"
+        rows.push(section(if cfg.scopes.is_empty() {
+            "projects: none yet, so the Projects tab adds one, or `scopes = [\"~/dev\"]` in canonize.toml (E) finds them"
         } else {
-            "projects: none under your project folders has a CLAUDE.md, AGENTS.md or other instructions file"
+            "projects: none under your scopes has a CLAUDE.md, AGENTS.md or other instructions file, so the Projects tab adds one by hand"
         }));
     }
     let total = rows.len();
     let table = Table::new(rows, widths)
         .header(Row::new(header))
         .block(block);
-    render_grid(f, area, table, 1, total, selected, top);
+    app.page
+        .set(render_grid(f, area, table, 1, total, selected, top));
 }
 
 /// Agent `a`'s import of house file `col` spelled out.
@@ -1787,6 +2159,25 @@ fn project_detail(app: &App, prow: usize, pcol: usize) -> Option<Pane> {
         },
     )];
     lines.push(field("project", tilde(&x.root)));
+    let marker = x
+        .host
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    lines.push(match (&x.scope, x.listed) {
+        (Some(scope), true) => field("found in", format!("{}, and you added it", tilde(scope))),
+        (Some(scope), false) => field(
+            "found in",
+            format!(
+                "{}, with its own {marker}, so it is a project while that file is there",
+                tilde(scope)
+            ),
+        ),
+        (None, _) => field(
+            "added",
+            "by you, in canonize.toml: the Projects tab forgets it".to_string(),
+        ),
+    });
     let spaces: Vec<String> = cfg
         .workspaces
         .iter()
@@ -1798,7 +2189,14 @@ fn project_detail(app: &App, prow: usize, pcol: usize) -> Option<Pane> {
     }
     // Named by its key, because the import itself lives in CANON.md and a row
     // saying `file` beside it reads as the file the import sits in.
-    lines.push(field("o opens", tilde(&x.host)));
+    lines.push(field(
+        "o opens",
+        if x.host.is_file() {
+            tilde(&x.host)
+        } else {
+            "nothing: it has no instructions file".to_string()
+        },
+    ));
     lines.push(field("file", tilde(h)));
     // What Enter does for this cell, named by its verb like the skills tab.
     let toggle = if cell.state == State::Linked {

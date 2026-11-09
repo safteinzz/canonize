@@ -32,7 +32,7 @@ Nothing is written until you say yes.
 
 ![the agents tab: a card opened with Enter, a broken rules import fixed with f, the skills line linking them all](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/agents.gif)
 
-Legend: green dot fully wired · yellow dot something needs fixing · hollow dot not installed
+Legend: green dot fully wired · yellow dot something needs fixing · hollow dot disabled
 
 ```bash
 canon            # the dashboard: Agents, Skills, Conventions, Workspaces and MCPs tabs
@@ -68,11 +68,13 @@ The agent finds the skill where it left it, so it sees no difference.
 ![the projects tab: a broken import repointed with Enter, then one convention added to every project with a](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/projects.gif)
 
 ```bash
-canon                           # tab to Conventions: who reads which convention
-canon add rust --every project  # every project reads rust
-canon add tui-vi .              # this project reads tui-vi
-canon remove tui-vi .           # and stops
-canon add wsl -a <agent>        # that agent reads wsl in every project
+canon                             # tab to Projects: ↵ makes a folder a project; Conventions: who reads which
+canon add rust --every project    # every project reads rust
+canon add tui-vi .                # this project reads tui-vi
+canon remove tui-vi .             # and stops
+canon add wsl -a <agent>          # that agent reads wsl in every project
+canon project add ~/other/app     # a project with no instructions file, or outside your scopes
+canon project remove ~/other/app  # forget it; nothing in it changes
 ```
 
 Nothing lands in the repo: the imports sit in a gitignored file. An agent that asks before loading files from outside a project is listed by `canon status` until you say yes.
@@ -89,6 +91,8 @@ canon unlink ~/issues/shop products/web             # drop one, or name none to 
 ```
 
 Notes and replies stay in the folders under it, one per issue say. Your agent is pointed at each project's files and conventions, and at the folder's CONTEXT.md: notes of yours it reads first, and adds to when told to remember something. Nothing is written in the projects.
+
+What every workspace should do, such as keeping a timeline of its work, goes in your canon's workspaces.md once, and reaches the workspaces you link later too.
 
 ## Give every agent the same MCP servers
 
@@ -127,11 +131,12 @@ Nothing prompts, so a script or an agent can do all of it: `--json` on `status` 
 ## Where it keeps things
 
 ```
-<canon>/canonize.toml             which agents, how each is wired, your workspaces (all optional)
+<canon>/canonize.toml             which agents, how each is wired, your scopes, projects and workspaces (all optional)
 <canon>/rules.yaml                the rules every agent follows
 <canon>/rules.schema.json         the shape `canon validate` holds them to
 <canon>/conventions/*.md          conventions, imported by the projects or agents they fit
 <canon>/mcp.toml                  your MCP servers, a table each
+<canon>/workspaces.md             what every workspace follows
 <canon>/skills/<name>/            one folder per skill, with its SKILL.md
 ~/.local/share/canonize/tokens/   the tokens you type for an MCP server, outside your canon
 ```

@@ -31,6 +31,7 @@ Enter
 Sleep 1s
 Tab
 Tab
+Tab
 # Past the agent rows, onto the first project and its broken import.
 Type "jjjj"
 Sleep 300ms

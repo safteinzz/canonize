@@ -1,7 +1,7 @@
 //! First run: find the rules a user already feeds their agents, and set the
 //! source up around them, so nobody starts from an empty screen.
 
-use crate::config::{self, CONFIG_FILE, tilde};
+use crate::config::{self, CONFIG_FILE, WORKSPACE_RULES, tilde};
 use anyhow::{Context, Result, bail};
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -35,7 +35,7 @@ impl Found {
                 .map_or(Pick::None, |s| Pick::Existing(name(s))),
             house: self.house.clone(),
             skills: "skills".to_string(),
-            projects: crate::projects::guess(),
+            scopes: crate::projects::guess(),
         }
     }
 }
@@ -58,7 +58,7 @@ pub struct Choice {
     /// Relative to `root`.
     pub skills: String,
     /// Folders to look through for projects, as the user wrote them.
-    pub projects: Vec<String>,
+    pub scopes: Vec<String>,
 }
 
 impl Choice {
@@ -69,14 +69,26 @@ impl Choice {
             Pick::New => default.to_string(),
             Pick::None => String::new(),
         };
-        let list: Vec<String> = self.projects.iter().map(|p| format!("\"{p}\"")).collect();
-        crate::init::config_text(
-            &format!("[{}]", list.join(", ")),
-            &q(&self.rules, "rules.yaml"),
-            &q(&self.schema, "rules.schema.json"),
-            self.house.as_deref().unwrap_or(""),
-            &self.skills,
-        )
+        let list: Vec<String> = self.scopes.iter().map(|p| format!("\"{p}\"")).collect();
+        crate::init::config_text(&crate::init::Answers {
+            scopes: &format!("[{}]", list.join(", ")),
+            projects: "[]",
+            rules: &q(&self.rules, "rules.yaml"),
+            schema: &q(&self.schema, "rules.schema.json"),
+            house: self.house.as_deref().unwrap_or(""),
+            skills: &self.skills,
+            workspaces: if self.workspace_rules() {
+                WORKSPACE_RULES
+            } else {
+                ""
+            },
+        })
+    }
+
+    /// Whether the canon already has the file every workspace follows, which
+    /// setup turns on only then.
+    fn workspace_rules(&self) -> bool {
+        self.root.join(WORKSPACE_RULES).is_file()
     }
 
     /// The answers and their consequences in plain sentences, for the last
@@ -106,20 +118,30 @@ impl Choice {
             "Your skills live in {}/.",
             tilde(&self.root.join(&self.skills))
         ));
-        out.push(if self.projects.is_empty() {
+        out.push(if self.scopes.is_empty() {
             "It looks for no projects.".to_string()
         } else {
-            format!("It looks for projects in {}.", self.projects.join(", "))
+            format!("It looks for projects in {}.", self.scopes.join(", "))
+        });
+        out.push(if self.workspace_rules() {
+            format!("Every workspace follows {WORKSPACE_RULES}.")
+        } else {
+            format!("You have no {WORKSPACE_RULES}, so a workspace follows only its own CANON.md.")
         });
         out.push(String::new());
-        let mut writes = vec![format!("canonize.toml in {}", tilde(&self.root))];
+        let mut writes = vec!["canonize.toml".to_string()];
         if self.rules == Pick::New {
             writes.push("rules.yaml".to_string());
         }
         if self.schema == Pick::New {
             writes.push("rules.schema.json".to_string());
         }
-        out.push(format!("It writes {}.", writes.join(", ")));
+        let names = match writes.as_slice() {
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+            [] => String::new(),
+        };
+        out.push(format!("It writes {names} in {}.", tilde(&self.root)));
         if let Some(link) = pointer_link(&self.root) {
             out.push(format!(
                 "It adds the shortcut {} to your canon, so `canon` finds it next time.",
@@ -261,6 +283,7 @@ pub fn around(rules: &Path, by: &Path) -> Option<Found> {
             house: pattern.to_string(),
             skills: PathBuf::new(),
             mcp: PathBuf::new(),
+            workspace_rules: PathBuf::new(),
         };
         !config::house_files(&probe).is_empty()
     };
@@ -345,6 +368,7 @@ pub fn house_patterns(root: &Path) -> Vec<(String, usize)> {
                 house: p.to_string(),
                 skills: PathBuf::new(),
                 mcp: PathBuf::new(),
+                workspace_rules: PathBuf::new(),
             };
             let n = config::house_files(&probe).len();
             (n > 0).then(|| (p.to_string(), n))
@@ -462,7 +486,7 @@ mod tests {
     fn setup_never_writes_over_a_config_that_is_already_there() {
         let t = Temp::new();
         let root = t.dir("canon");
-        let mine = "projects = []\n";
+        let mine = "scopes = []\n";
         fs::write(root.join(CONFIG_FILE), mine).expect("could not write");
         let choice = Choice {
             root: root.clone(),
@@ -470,7 +494,7 @@ mod tests {
             schema: Pick::None,
             house: None,
             skills: "skills".to_string(),
-            projects: Vec::new(),
+            scopes: Vec::new(),
         };
 
         assert!(
@@ -497,7 +521,7 @@ mod tests {
             schema: Pick::None,
             house: Some("HOUSE-*.md".to_string()),
             skills: "skills".to_string(),
-            projects: vec!["~/dev".to_string(), "~/work".to_string()],
+            scopes: vec!["~/dev".to_string(), "~/work".to_string()],
         };
         fs::write(root.join(CONFIG_FILE), choice.config_text()).expect("could not write");
 
@@ -509,7 +533,7 @@ mod tests {
         );
         assert_eq!(cfg.source.house, "HOUSE-*.md");
         assert_eq!(
-            cfg.projects,
+            cfg.scopes,
             [config::expand("~/dev"), config::expand("~/work")]
         );
     }

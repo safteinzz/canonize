@@ -1,7 +1,8 @@
-//! Projects: the repos under the user's project folders, and which house files
-//! each one imports from the canon.
+//! Projects: the repos under the user's scopes and the folders they named, and
+//! which house files each one imports from the canon.
 //!
-//! A project is a folder with one of `MARKERS`. Its house imports
+//! A project is a folder under a scope with one of `MARKERS`, or a folder
+//! listed under `projects` in canonize.toml, whatever it holds. Its house imports
 //! live in its own `CANON.md`, gitignored and written only by canonize, which
 //! each agent loads its own way (Claude through `@CANON.md` in a gitignored
 //! `CLAUDE.local.md`). House imports still sitting in CLAUDE.md or AGENTS.md,
@@ -10,6 +11,7 @@
 
 use crate::config::{self, Config, tilde};
 use crate::plan::{CANON_FILE, Change, LOCAL_FILE, LOCAL_HEADER, State};
+use anyhow::{Result, bail};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -50,6 +52,10 @@ pub struct Project {
     /// The folder Claude Code files its answer under: the git repo's root,
     /// which is not the project's when the project sits inside a repo.
     pub claude_key: PathBuf,
+    /// The scope it was found under, `None` when it is only listed.
+    pub scope: Option<PathBuf>,
+    /// Whether `projects` in canonize.toml names it.
+    pub listed: bool,
 }
 
 /// Claude Code loads a file outside the project only once the user has said
@@ -125,38 +131,105 @@ pub struct Projects {
     /// The canon's house files, as columns.
     pub house: Vec<PathBuf>,
     pub list: Vec<Project>,
+    /// Listed projects whose folder is not on this machine, as listed.
+    pub gone: Vec<PathBuf>,
+    /// The folders directly inside a scope that could be named a project:
+    /// neither one nor holding one, and clear of every workspace, the canon
+    /// and each agent's own folder. Never deeper, since below that level lie
+    /// a project's own insides, whatever version control it uses or none.
+    /// Sorted by path.
+    pub candidates: Vec<PathBuf>,
+    /// Scopes that are not folders on this machine, as written.
+    pub missing_scopes: Vec<PathBuf>,
 }
 
 impl Projects {
     pub fn build(cfg: &Config) -> Projects {
         let house = config::house_files(&cfg.source);
-        let mut roots = Vec::new();
-        // A workspace's own CLAUDE.md is canonize's, and holds no project.
-        let skip: Vec<PathBuf> = cfg
+        let listed: Vec<PathBuf> = cfg
+            .projects
+            .iter()
+            .filter_map(|p| fs::canonicalize(p).ok())
+            .collect();
+        let real_of = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        // A workspace's own CLAUDE.md is canonize's and holds no project, and
+        // the canon and an agent's own folder hold files of every name.
+        let spaces: Vec<PathBuf> = cfg
             .workspaces
             .iter()
             .filter_map(|w| fs::canonicalize(&w.root).ok())
             .collect();
-        for dir in &cfg.projects {
-            if let Ok(real) = fs::canonicalize(dir) {
-                walk(dir, &real, 0, &skip, &mut roots);
+        let own: Vec<PathBuf> = std::iter::once(&cfg.source.root)
+            .chain(cfg.agents.iter().map(|a| &a.home))
+            .map(|p| real_of(p))
+            .collect();
+        let mut w = Walk {
+            skip: spaces.iter().chain(&own).cloned().collect(),
+            listed: listed.clone(),
+            found: Vec::new(),
+            seen: Vec::new(),
+        };
+        for scope in &cfg.scopes {
+            if let Ok(real) = fs::canonicalize(scope) {
+                w.walk(scope, &real, 0, scope);
+            }
+        }
+        let mut roots: Vec<(PathBuf, Option<PathBuf>)> =
+            w.found.into_iter().map(|(r, s)| (r, Some(s))).collect();
+        roots.sort();
+        roots.dedup_by(|a, b| a.0 == b.0);
+        let found_real: Vec<PathBuf> = roots.iter().map(|(r, _)| real_of(r)).collect();
+        let mut gone = Vec::new();
+        for (p, real) in cfg
+            .projects
+            .iter()
+            .zip(cfg.projects.iter().map(|p| real_of(p)))
+        {
+            if !p.is_dir() {
+                gone.push(p.clone());
+            } else if !found_real.contains(&real) {
+                roots.push((p.clone(), None));
             }
         }
         roots.sort();
-        roots.dedup();
+        roots.dedup_by(|a, b| a.0 == b.0);
+
         let claude = cfg.agents.iter().any(|a| a.name == "claude" && a.active());
         let approvals = approvals(cfg, claude);
-        let list = roots
+        let list: Vec<Project> = roots
             .iter()
-            .map(|r| {
+            .map(|(r, scope)| {
                 let mut p = project(r, &house, claude);
+                // Found means found by an instructions file: an added folder
+                // under a scope with none is only added.
+                p.scope = scope.clone().filter(|_| p.host.is_file());
+                p.listed = listed.contains(&real_of(r));
                 if p.uses_canon() {
                     p.claude = approvals.as_ref().map(|a| approval(a, &mut p));
                 }
                 p
             })
             .collect();
-        Projects { house, list }
+        let taken: Vec<PathBuf> = list.iter().map(|p| real_of(&p.root)).collect();
+        let overlaps = |real: &Path| {
+            own.iter()
+                .chain(&spaces)
+                .any(|o| o.starts_with(real) || real.starts_with(o))
+        };
+        let mut candidates: Vec<PathBuf> = w
+            .seen
+            .into_iter()
+            .filter(|(_, real)| !taken.iter().any(|t| t.starts_with(real)) && !overlaps(real))
+            .map(|(dir, _)| dir)
+            .collect();
+        candidates.sort();
+        Projects {
+            house,
+            list,
+            gone,
+            candidates,
+            missing_scopes: cfg.scopes.iter().filter(|s| !s.is_dir()).cloned().collect(),
+        }
     }
 
     /// What `fix` does on its own: repoint or move broken imports, and wire
@@ -248,9 +321,10 @@ impl Project {
     }
 }
 
-/// A short name for a project: its path under the project folder it was found in.
+/// A short name for a project: its path under the scope it sits in, else its
+/// path from home.
 pub fn short(cfg: &Config, root: &Path) -> String {
-    cfg.projects
+    cfg.scopes
         .iter()
         .find_map(|d| root.strip_prefix(d).ok())
         .map(|p| p.display().to_string())
@@ -258,33 +332,148 @@ pub fn short(cfg: &Config, root: &Path) -> String {
         .unwrap_or_else(|| tilde(root))
 }
 
-/// `real` is `dir`'s real path, which holds for every folder below it
-/// because links are never followed.
-fn walk(dir: &Path, real: &Path, depth: usize, skip: &[PathBuf], out: &mut Vec<PathBuf>) {
-    if skip.iter().any(|s| s == real) {
-        return;
-    }
-    // One listing answers what a stat per marker would, and each stat is a
-    // round trip on a network or WSL drive.
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    let entries: Vec<fs::DirEntry> = entries.flatten().collect();
-    if marked(dir, &entries) {
-        out.push(dir.to_path_buf());
-        return;
-    }
-    if depth >= DEPTH {
-        return;
-    }
-    for e in entries {
-        let name = e.file_name().to_string_lossy().into_owned();
-        // A link is skipped so a folder linked into itself cannot loop.
-        let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
-        if !is_dir || name.starts_with('.') || SKIP.contains(&name.as_str()) {
-            continue;
+/// One walk through the scopes, compared by real path throughout.
+struct Walk {
+    /// Workspaces, the canon and the agents' own folders, never walked into.
+    skip: Vec<PathBuf>,
+    /// Listed projects: each is a project whatever it holds, and not walked
+    /// into, so nothing under one becomes a project of its own.
+    listed: Vec<PathBuf>,
+    /// Each project found, with the scope it was found under.
+    found: Vec<(PathBuf, PathBuf)>,
+    /// Every folder directly inside a scope that is not a project, with its
+    /// real path.
+    seen: Vec<(PathBuf, PathBuf)>,
+}
+
+impl Walk {
+    /// `real` is `dir`'s real path, which holds for every folder below it
+    /// because links are never followed.
+    fn walk(&mut self, dir: &Path, real: &Path, depth: usize, scope: &Path) {
+        if self.skip.iter().any(|s| s == real) {
+            return;
         }
-        walk(&e.path(), &real.join(&name), depth + 1, skip, out);
+        // One listing answers what a stat per marker would, and each stat is
+        // a round trip on a network or WSL drive.
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        let entries: Vec<fs::DirEntry> = entries.flatten().collect();
+        // A scope is looked through, never a project itself: a CLAUDE.md at
+        // its top would otherwise swallow every project under it.
+        if depth > 0 && (self.listed.iter().any(|l| l == real) || marked(dir, &entries)) {
+            self.found.push((dir.to_path_buf(), scope.to_path_buf()));
+            return;
+        }
+        if depth == 1 {
+            self.seen.push((dir.to_path_buf(), real.to_path_buf()));
+        }
+        if depth >= DEPTH {
+            return;
+        }
+        for e in entries {
+            let name = e.file_name().to_string_lossy().into_owned();
+            // A link is skipped so a folder linked into itself cannot loop.
+            let is_dir = e.file_type().is_ok_and(|t| t.is_dir());
+            if !is_dir || name.starts_with('.') || SKIP.contains(&name.as_str()) {
+                continue;
+            }
+            self.walk(&e.path(), &real.join(&name), depth + 1, scope);
+        }
+    }
+}
+
+/// What naming the folder `dir` (as typed) a project does, or why it cannot
+/// be one: it must be a folder of its own, neither a project already nor
+/// inside or holding one, and clear of every workspace, the canon and each
+/// agent's own folder.
+pub fn adding(cfg: &Config, projects: &Projects, dir: &str) -> Result<Change> {
+    let typed = config::expand(dir);
+    let Ok(real) = fs::canonicalize(&typed) else {
+        bail!(
+            "`{}` is not a folder: make it first, then try again",
+            tilde(&typed)
+        );
+    };
+    if !real.is_dir() {
+        bail!(
+            "`{}` is not a folder: make it first, then try again",
+            tilde(&real)
+        );
+    }
+    let real_of = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    if let Some(scope) = cfg.scopes.iter().find(|s| real_of(s) == real) {
+        bail!(
+            "`{}` is a scope, which canonize looks through for projects: name a folder inside it",
+            tilde(scope)
+        );
+    }
+    for p in &projects.list {
+        let root = real_of(&p.root);
+        if root == real {
+            bail!(
+                "`{}` is already a project: `canon status` lists it as `{}`",
+                tilde(&real),
+                short(cfg, &p.root)
+            );
+        }
+        if real.starts_with(&root) {
+            bail!(
+                "`{}` is inside the project at `{}`: a project is the first folder with an instructions file, so name the folder you work in",
+                tilde(&real),
+                tilde(&p.root)
+            );
+        }
+        if root.starts_with(&real) {
+            bail!(
+                "`{}` holds the project at `{}`, which would then disappear under it: add the folder you work in",
+                tilde(&real),
+                tilde(&p.root)
+            );
+        }
+    }
+    let mut taken: Vec<(&Path, &str)> = cfg
+        .workspaces
+        .iter()
+        .map(|w| (w.root.as_path(), "a workspace"))
+        .collect();
+    taken.push((&cfg.source.root, "your canon"));
+    taken.extend(
+        cfg.agents
+            .iter()
+            .map(|a| (a.home.as_path(), "an agent's own folder")),
+    );
+    for (other, what) in taken {
+        let other = real_of(other);
+        if real.starts_with(&other) || other.starts_with(&real) {
+            bail!(
+                "`{}` overlaps {what} at `{}`: a project is a folder of its own, outside every workspace and agent folder and your canon",
+                tilde(&real),
+                tilde(&other)
+            );
+        }
+    }
+    let add = Change::Project {
+        config: cfg.path.clone(),
+        path: tilde(&real),
+        keep: true,
+    };
+    Ok(if cfg.legacy_projects {
+        Change::Batch {
+            what: format!("{}, renaming `projects` to `scopes` first", add.describe()),
+            changes: vec![renaming(cfg), add],
+        }
+    } else {
+        add
+    })
+}
+
+/// Renaming `projects` to `scopes` in a config from before 0.5.0.
+pub fn renaming(cfg: &Config) -> Change {
+    Change::RenameSetting {
+        config: cfg.path.clone(),
+        from: "projects".into(),
+        to: "scopes".into(),
     }
 }
 
@@ -454,6 +643,8 @@ fn read(
         dead,
         claude: None,
         claude_key: root.to_path_buf(),
+        scope: None,
+        listed: false,
     }
 }
 

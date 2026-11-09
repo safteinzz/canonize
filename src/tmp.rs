@@ -88,6 +88,7 @@ pub fn source(root: &Path) -> Source {
         house: "house/*.md".to_string(),
         skills: root.join("skills"),
         mcp: root.join("mcp.toml"),
+        workspace_rules: PathBuf::new(),
     }
 }
 
@@ -122,7 +123,8 @@ pub fn claude(home: &Path) -> Agent {
     )
 }
 
-pub fn config(source: Source, agents: Vec<Agent>, projects: Vec<PathBuf>) -> Config {
+/// A config looking through `scopes`, naming no project of its own.
+pub fn config(source: Source, agents: Vec<Agent>, scopes: Vec<PathBuf>) -> Config {
     let path = source.root.join(crate::config::CONFIG_FILE);
     let shortcut = source.root.join(".shortcut-that-is-not-there");
     let claude_state = source.root.join(".claude-state-that-is-not-there.json");
@@ -130,7 +132,9 @@ pub fn config(source: Source, agents: Vec<Agent>, projects: Vec<PathBuf>) -> Con
     Config {
         source,
         agents,
-        projects,
+        scopes,
+        projects: Vec::new(),
+        legacy_projects: false,
         workspaces: Vec::new(),
         path,
         // A test never reads the real ones: `~/.config/canonize` and

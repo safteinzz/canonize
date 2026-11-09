@@ -18,13 +18,13 @@ impl App {
         use KeyCode::*;
         let rows = self.house_rows();
         let cols = self.mcps.as_ref().map_or(0, |m| m.servers.len());
+        if let Some(to) = self.motion(key, self.mrow, rows) {
+            self.mrow = to;
+            return Some(None);
+        }
         match key.code {
-            Down | Char('j') => self.mrow = (self.mrow + 1).min(rows.saturating_sub(1)),
-            Up | Char('k') => self.mrow = self.mrow.saturating_sub(1),
             Right | Char('l') => self.mcol = (self.mcol + 1).min(cols.saturating_sub(1)),
             Left | Char('h') => self.mcol = self.mcol.saturating_sub(1),
-            Char('g') | Home => self.mrow = 0,
-            Char('G') | End => self.mrow = rows.saturating_sub(1),
             Char('f') => self.mcp_toggle(Some(true)),
             Enter | Char(' ') => self.mcp_toggle(None),
             Char('c') => self.server_form = Some(ServerForm::new()),

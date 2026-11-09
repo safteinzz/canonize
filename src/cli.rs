@@ -118,9 +118,9 @@ pub struct SetupArgs {
     /// The folder your skills live in
     #[arg(long, value_name = "DIR")]
     pub skills: Option<String>,
-    /// A folder to look for projects in, once per folder ("" for none)
-    #[arg(long, value_name = "DIR")]
-    pub projects: Vec<String>,
+    /// A folder to look through for projects, once per folder ("" for none)
+    #[arg(long = "scopes", alias = "projects", value_name = "DIR")]
+    pub scopes: Vec<String>,
 }
 
 #[derive(clap::Args)]
@@ -171,19 +171,47 @@ pub struct MoveArgs {
 pub enum ConfigCmd {
     /// Set one setting, keeping every comment in the file
     ///   canon config set agents.pi.skills_mode per-skill
-    ///   canon config set projects ~/dev ~/work
+    ///   canon config set scopes ~/dev ~/work
     #[command(verbatim_doc_comment)]
     Set(ConfigSetArgs),
 }
 
 #[derive(clap::Args)]
 pub struct ConfigSetArgs {
-    /// `projects`, `source.<name>` or `agents.<agent>.<name>`
+    /// `scopes`, `projects`, `source.<name>` or `agents.<agent>.<name>`
     pub key: String,
     /// What to set it to, or several values for a list
     #[arg(required = true)]
     pub value: Vec<String>,
     /// Dry run: print the line it would write and change nothing
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+}
+
+#[derive(clap::Subcommand)]
+pub enum ProjectCmd {
+    /// Name folders projects, wherever they are and whatever they hold
+    Add(ProjectAddArgs),
+    /// Forget projects you named; nothing in their folders changes
+    Remove(ProjectRemoveArgs),
+}
+
+#[derive(clap::Args)]
+pub struct ProjectAddArgs {
+    /// A folder to name a project, one or more (`.` for this one)
+    #[arg(required = true, value_name = "DIR")]
+    pub dirs: Vec<String>,
+    /// Dry run: print what would change and change nothing
+    #[arg(short = 'n', long)]
+    pub dry_run: bool,
+}
+
+#[derive(clap::Args)]
+pub struct ProjectRemoveArgs {
+    /// A project you named, as `canon status` names it or by its path, one or more
+    #[arg(required = true, value_name = "DIR|NAME")]
+    pub projects: Vec<String>,
+    /// Dry run: print what would change and change nothing
     #[arg(short = 'n', long)]
     pub dry_run: bool,
 }
@@ -238,7 +266,7 @@ pub fn status(args: AgentArgs) -> Result<i32> {
         || houses.drifted(only)
         || mcps.drifted(only)
         || spaces.drifted(only)
-        || (only.is_none() && projects.drifted());
+        || (only.is_none() && (projects.drifted() || cfg.legacy_projects));
     let unapproved = if only.is_none() {
         projects.unapproved()
     } else {
@@ -256,8 +284,9 @@ pub fn status(args: AgentArgs) -> Result<i32> {
         out!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(code);
     }
+    // An agent that is not installed gets a column only when `-a` names it.
     let cols: Vec<usize> = (0..cfg.agents.len())
-        .filter(|i| only.is_none_or(|o| o == *i))
+        .filter(|&i| only.map_or(cfg.agents[i].installed(), |o| o == i))
         .collect();
 
     out!("{} {}", "canon".dimmed(), tilde(&cfg.source.root));
@@ -340,7 +369,13 @@ pub fn status(args: AgentArgs) -> Result<i32> {
     for c in plan.stale_for(only) {
         notes.push(format!("stale: {}", c.describe()));
     }
-    let shown = (only.is_none() && !cfg.projects.is_empty()).then_some(&projects);
+    if only.is_none() && cfg.legacy_projects {
+        notes.push(format!(
+            "{}: `projects` is now `scopes`, the folders to look through, and `projects` names projects: `canon fix` renames the line",
+            config::CONFIG_FILE
+        ));
+    }
+    let shown = (only.is_none() && cfg.has_projects()).then_some(&projects);
     print_houses(&cfg, &houses, shown, &cols, &mut notes);
     print_workspaces(&cfg, &spaces, &mcps, &projects, &cols, &mut notes);
     print_mcp(&cfg, &mcps, shown, &cols, &mut notes);
@@ -534,6 +569,33 @@ fn foreign_elsewhere(
     }
     if only.is_some() {
         return out;
+    }
+    for scope in &projects.missing_scopes {
+        out.push(Foreign {
+            agent: None,
+            kind: "scope",
+            state: "broken",
+            name: scope.display().to_string(),
+            project: None,
+            workspace: None,
+            who: tilde(scope),
+            why: "it is under `scopes` but is not a folder, so nothing is found there: `canon config set scopes <DIR>...` lists the folders to look through".to_string(),
+        });
+    }
+    for gone in &projects.gone {
+        out.push(Foreign {
+            agent: None,
+            kind: "project",
+            state: "broken",
+            name: gone.display().to_string(),
+            project: Some(gone.clone()),
+            workspace: None,
+            who: tilde(gone),
+            why: format!(
+                "it is in `projects` but not on this machine: `canon project remove {}` forgets it",
+                tilde(gone)
+            ),
+        });
     }
     for (p, cells) in projects.list.iter().zip(&mcps.projects) {
         let short = projects::short(cfg, &p.root);
@@ -729,6 +791,8 @@ fn status_json(
             json!({
                 "path": p.root,
                 "name": projects::short(cfg, &p.root),
+                "scope": p.scope,
+                "listed": p.listed,
                 "conventions": house,
                 "wiring": wiring,
                 "dead": p.dead,
@@ -824,6 +888,9 @@ fn status_json(
     json!({
         "canon": cfg.source.root,
         "config": cfg.path,
+        "scopes": cfg.scopes,
+        "workspace_rules": (!cfg.source.workspace_rules.as_os_str().is_empty())
+            .then_some(&cfg.source.workspace_rules),
         "agents": agents,
         "rows": rows,
         "leftovers": leftovers,
@@ -844,7 +911,7 @@ fn status_json(
             || houses.drifted(only)
             || mcps.drifted(only)
             || spaces.drifted(only)
-            || (only.is_none() && projects.drifted()),
+            || (only.is_none() && (projects.drifted() || cfg.legacy_projects)),
     })
 }
 
@@ -1388,6 +1455,9 @@ pub fn fix(args: ChangeArgs) -> Result<i32> {
         Some(i) => plan.changes_for(i),
         None => {
             let mut all = plan.changes();
+            if cfg.legacy_projects {
+                all.push(projects::renaming(&cfg));
+            }
             all.extend(projects.fixes());
             all
         }
@@ -1461,7 +1531,7 @@ pub fn place(args: PlaceArgs, remove: bool) -> Result<i32> {
     if every(Every::Agent) {
         agents.extend((0..cfg.agents.len()).map(|a| (a, false)));
     }
-    if picked.is_empty() && folders.is_empty() && agents.is_empty() {
+    if args.projects.is_empty() && args.agents.is_empty() && args.every.is_empty() {
         bail!(
             "say where: a project or workspace, `-a AGENT`, or `--every project|workspace|agent`"
         );
@@ -1726,16 +1796,86 @@ pub fn project_index(cfg: &Config, p: &Projects, arg: &str) -> Result<usize> {
             return Ok(i);
         }
     }
-    if cfg.projects.is_empty() {
+    if cfg.scopes.is_empty() {
         bail!(
-            "`{arg}` is not a project canonize knows: no project folder is set, `canon config set projects <DIR>...` sets one"
+            "`{arg}` is not a project canonize knows: no scope is set, `canon config set scopes <DIR>...` sets one, and `canon project add <DIR>` names a project wherever it is"
         );
     }
-    let dirs: Vec<String> = cfg.projects.iter().map(|d| tilde(d)).collect();
+    let dirs: Vec<String> = cfg.scopes.iter().map(|d| tilde(d)).collect();
     bail!(
-        "`{arg}` is not a project canonize knows: it looks in `{}` for a folder with a CLAUDE.md, AGENTS.md or other instructions file, and `canon status` lists what it found",
+        "`{arg}` is not a project canonize knows: it looks in `{}` for a folder with a CLAUDE.md, AGENTS.md or other instructions file, `canon status` lists what it found, and `canon project add <DIR>` names one wherever it is",
         dirs.join("`, `")
     )
+}
+
+/// `canon project add` and `canon project remove`. Every argument is checked
+/// before anything runs, so one refusal means nothing changed.
+pub fn project(cmd: ProjectCmd) -> Result<i32> {
+    let cfg = config::load()?;
+    let projects = Projects::build(&cfg);
+    match cmd {
+        ProjectCmd::Add(args) => {
+            let mut changes = Vec::new();
+            for dir in &args.dirs {
+                let path = typed_path(dir).map_or_else(|| dir.clone(), |p| tilde(&p));
+                changes.push(projects::adding(&cfg, &projects, &path)?);
+            }
+            let changes = plan::dedup(changes.into_iter());
+            let code = run_changes(changes, args.dry_run, "");
+            if code == 0 {
+                out!(
+                    "{}",
+                    "`canon link <WORKSPACE> <DIR>` points a workspace at it, `canon add <CONVENTION> <DIR>` gives it a convention".dimmed()
+                );
+            }
+            Ok(code)
+        }
+        ProjectCmd::Remove(args) => {
+            let mut changes = Vec::new();
+            let mut notes = Vec::new();
+            for arg in &args.projects {
+                let forget = |path: &std::path::Path| Change::Project {
+                    config: cfg.path.clone(),
+                    path: tilde(path),
+                    keep: false,
+                };
+                let typed = typed_path(arg).unwrap_or_else(|| config::expand(arg));
+                if let Some(gone) = projects
+                    .gone
+                    .iter()
+                    .find(|g| **g == typed || tilde(g) == *arg)
+                {
+                    changes.push(forget(gone));
+                    continue;
+                }
+                let at = typed_path(arg).map_or_else(|| arg.clone(), |p| tilde(&p));
+                let p = &projects.list[project_index(&cfg, &projects, &at)?];
+                let name = projects::short(&cfg, &p.root);
+                let marker = p
+                    .host
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if !p.listed {
+                    bail!(
+                        "`{name}` is a project because it has `{marker}`: canonize never deletes a file of yours, so it stays a project while that file is there"
+                    );
+                }
+                if let Some(scope) = &p.scope {
+                    notes.push(format!(
+                        "`{name}` is also found under `{}`, so it stays a project",
+                        tilde(scope)
+                    ));
+                }
+                changes.push(forget(&p.root));
+            }
+            let code = run_changes(plan::dedup(changes.into_iter()), args.dry_run, "");
+            for n in notes {
+                out!("{}", n.dimmed());
+            }
+            Ok(code)
+        }
+    }
 }
 
 pub fn validate(args: JsonArgs) -> Result<i32> {
@@ -2038,7 +2178,12 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
             if let Some(name) = header(line) {
                 section = name;
             }
-            let new = if is_config && section == "workspaces" {
+            let list = section.is_empty()
+                && ["projects", "scopes"].iter().any(|k| {
+                    line.strip_prefix(k)
+                        .is_some_and(|rest| rest.trim_start().starts_with('='))
+                });
+            let new = if is_config && (section == "workspaces" || list) {
                 workspace_line(line, &under)
             } else if is_config {
                 setting(line, &cfg.source.root, &root_after, &under)
@@ -2069,7 +2214,8 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
         }
     };
     for w in &cfg.workspaces {
-        let mut moved = under(&w.root).is_some();
+        let mut moved =
+            under(&w.root).is_some() || workspaces::rules(cfg).is_some_and(|r| under(r).is_some());
         let mut gone = false;
         let mut sections = Vec::new();
         for p in &w.projects {
@@ -2090,7 +2236,8 @@ fn repoint(cfg: &Config, from: &std::path::Path, to: &std::path::Path) -> Vec<Ch
         if !moved || gone {
             continue;
         }
-        let body = workspaces::body(&after(&w.root), &sections);
+        let rules = workspaces::rules(cfg).map(&after);
+        let body = workspaces::body(&after(&w.root), &sections, rules.as_deref());
         out.extend(workspaces::rewrites(
             cfg,
             &now(&w.root),
@@ -2190,7 +2337,8 @@ fn header(line: &str) -> Option<&str> {
 }
 
 /// A `[workspaces]` line with its folder and its projects each moved along,
-/// or nothing when none is in what moved. A comment after it stays, but a
+/// or a `projects` or `scopes` list with each folder moved along, or nothing
+/// when none is in what moved. A comment after it stays, but a
 /// list written over several lines is not read here.
 fn workspace_line(
     line: &str,
@@ -2279,9 +2427,15 @@ fn setting(
 pub fn config(cmd: ConfigCmd) -> Result<i32> {
     let ConfigCmd::Set(args) = cmd;
     let cfg = config::load()?;
+    if cfg.legacy_projects && matches!(args.key.as_str(), "projects" | "scopes") {
+        bail!(
+            "{} still says `projects` for the folders to look through, so nothing was changed: `canon fix` renames it to `scopes`, then run this again",
+            config::CONFIG_FILE
+        );
+    }
     // A list, a bool and a number are written as they are; everything else is
     // text, so it goes in quotes.
-    let literal = if args.key == "projects" || args.value.len() > 1 {
+    let literal = if matches!(args.key.as_str(), "projects" | "scopes") || args.value.len() > 1 {
         let items: Vec<String> = args.value.iter().map(|v| format!("\"{v}\"")).collect();
         format!("[{}]", items.join(", "))
     } else {
@@ -2361,7 +2515,7 @@ fn from_root(root: &std::path::Path) -> setup::Choice {
         schema: first(setup::schema_files(root)).map_or(setup::Pick::None, setup::Pick::Existing),
         house: setup::house_patterns(root).first().map(|(p, _)| p.clone()),
         skills: "skills".to_string(),
-        projects: projects::guess(),
+        scopes: projects::guess(),
     }
 }
 
@@ -2437,9 +2591,9 @@ pub fn setup(args: SetupArgs) -> Result<i32> {
     if let Some(dir) = &args.skills {
         choice.skills = dir.clone();
     }
-    if !args.projects.is_empty() {
-        choice.projects = args
-            .projects
+    if !args.scopes.is_empty() {
+        choice.scopes = args
+            .scopes
             .iter()
             .filter(|p| !p.is_empty())
             .cloned()

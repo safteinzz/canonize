@@ -1,7 +1,8 @@
 //! The workspaces tab's `c`, and `a` in a workspace's card: a form for a
 //! folder to link to a project, or for one more project the workspace is for.
 //! The project is typed, or picked with `ctrl-o` from the projects canonize
-//! found.
+//! knows and the folders under the scopes that are not one yet, which saving
+//! makes a project in the same run.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
@@ -30,8 +31,9 @@ pub(crate) struct LinkForm {
     /// Each field's cursor, as characters after it (`line_edit::edit`), in
     /// the order `workspace`, `project`.
     backs: [usize; 2],
-    /// The projects `ctrl-o` picks from, as `canon status` names them.
-    choices: Vec<String>,
+    /// What `ctrl-o` picks from, as `canon status` names them, each with
+    /// whether it is a folder that is not a project yet.
+    choices: Vec<(String, bool)>,
     /// The picked choice while the picker is open.
     picking: Option<usize>,
     /// Why the last save was refused, shown in place of the note.
@@ -46,7 +48,7 @@ pub(crate) enum Linked {
 }
 
 impl LinkForm {
-    pub(super) fn new(choices: Vec<String>) -> LinkForm {
+    pub(super) fn new(choices: Vec<(String, bool)>) -> LinkForm {
         LinkForm {
             fixed: None,
             focus: 0,
@@ -60,7 +62,7 @@ impl LinkForm {
     }
 
     /// The form for one more project of the workspace `key`.
-    pub(super) fn adding(key: &str, choices: Vec<String>) -> LinkForm {
+    pub(super) fn adding(key: &str, choices: Vec<(String, bool)>) -> LinkForm {
         let mut f = LinkForm::new(choices);
         f.fixed = Some(key.to_string());
         f
@@ -94,7 +96,7 @@ impl LinkForm {
                 Down | Char('j') => self.picking = Some((at + 1).min(last)),
                 Up | Char('k') => self.picking = Some(at.saturating_sub(1)),
                 Enter => {
-                    if let Some(name) = self.choices.get(at) {
+                    if let Some((name, _)) = self.choices.get(at) {
                         self.project = name.clone();
                         self.backs[1] = 0;
                     }
@@ -107,9 +109,9 @@ impl LinkForm {
         }
         if ctrl && key.code == Char('o') && self.row() == Row::Project {
             if self.choices.is_empty() {
-                self.error = Some("canonize found no project to pick: type its path".into());
+                self.error = Some("nothing to pick: type the project's path".into());
             } else {
-                let at = self.choices.iter().position(|c| *c == self.project.trim());
+                let at = self.choices.iter().position(|c| c.0 == self.project.trim());
                 self.picking = Some(at.unwrap_or(0));
             }
             return Linked::Pending;
@@ -242,12 +244,19 @@ pub(super) fn render_link_form(f: &mut Frame, area: Rect, form: &LinkForm) {
         r,
     );
     if let Some(at) = form.picking {
-        render_picker(f, area, &form.choices, at);
+        render_picker(f, area, "projects", &form.choices, at);
     }
 }
 
-/// The projects to pick from, scrolled so `at` is on screen.
-fn render_picker(f: &mut Frame, area: Rect, choices: &[String], at: usize) {
+/// The choices to pick from under `title`, scrolled so `at` is on screen,
+/// each marked when it is a folder that is not a project yet.
+pub(super) fn render_picker(
+    f: &mut Frame,
+    area: Rect,
+    title: &str,
+    choices: &[(String, bool)],
+    at: usize,
+) {
     let width = box_width(area.width);
     // The choices, then a blank and the key row.
     let rect = box_area(
@@ -256,7 +265,7 @@ fn render_picker(f: &mut Frame, area: Rect, choices: &[String], at: usize) {
         box_height(choices.len() as u16 + 2, area.height),
     );
     f.render_widget(Clear, rect);
-    let block = box_block(Color::Cyan, "projects");
+    let block = box_block(Color::Cyan, title);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let shown = (inner.height as usize).saturating_sub(2).max(1);
@@ -266,7 +275,7 @@ fn render_picker(f: &mut Frame, area: Rect, choices: &[String], at: usize) {
         .enumerate()
         .skip(top)
         .take(shown)
-        .map(|(i, name)| {
+        .map(|(i, (name, folder))| {
             let style = if i == at {
                 Style::default()
                     .fg(Color::Black)
@@ -275,7 +284,14 @@ fn render_picker(f: &mut Frame, area: Rect, choices: &[String], at: usize) {
             } else {
                 Style::default()
             };
-            Line::styled(format!(" {name} "), style)
+            let mut spans = vec![Span::styled(format!(" {name} "), style)];
+            if *folder {
+                spans.push(Span::styled(
+                    " not a project yet",
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+            }
+            Line::from(spans)
         })
         .collect();
     f.render_widget(

@@ -15,6 +15,10 @@ categories = ["command-line-utilities", "development-tools"]
 # own agent wiring and name files that live outside it.
 exclude = ["readme-assets/", "demo/", "CANON.md", "CLAUDE.md"]
 
+# The programs canon starts, for tools that ask what an install needs beside its libraries.
+[package.metadata]
+runs = ["git", "claude"]
+
 # The crate is `canonize`, but the command you type is `canon`.
 [[bin]]
 name = "canon"

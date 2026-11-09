@@ -13,6 +13,9 @@ use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = "canonize.toml";
 
+/// The file every workspace follows, by its default name in the canon.
+pub const WORKSPACE_RULES: &str = "workspaces.md";
+
 /// How the rules file reaches an agent.
 #[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(rename_all = "kebab-case")]
@@ -45,6 +48,9 @@ pub struct Source {
     pub skills: PathBuf,
     /// The canon's MCP servers, one table each; empty when turned off.
     pub mcp: PathBuf,
+    /// What every workspace follows, named in the files canonize writes at
+    /// its top; empty when turned off.
+    pub workspace_rules: PathBuf,
 }
 
 pub struct Agent {
@@ -56,6 +62,14 @@ pub struct Agent {
     pub rules_mode: RulesMode,
     pub skills: PathBuf,
     pub skills_mode: SkillsMode,
+}
+
+impl Config {
+    /// Whether it can have a project at all: a folder to look through, or one
+    /// named as a project.
+    pub fn has_projects(&self) -> bool {
+        !self.scopes.is_empty() || !self.projects.is_empty()
+    }
 }
 
 impl Agent {
@@ -85,7 +99,13 @@ pub struct Config {
     pub agents: Vec<Agent>,
     /// Folders to look through for projects: folders with a `CLAUDE.md`,
     /// `AGENTS.md` or another file of `projects::MARKERS`.
+    pub scopes: Vec<PathBuf>,
+    /// Folders the user named as projects, wherever they are and whatever
+    /// they hold.
     pub projects: Vec<PathBuf>,
+    /// The file still says `projects` for the folders to look through, as
+    /// before 0.5.0, which `fix` renames to `scopes`.
+    pub legacy_projects: bool,
     pub workspaces: Vec<Workspace>,
     /// The file the config was read from, or where it would be.
     pub path: PathBuf,
@@ -103,6 +123,7 @@ pub struct Config {
 #[derive(Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RawConfig {
+    scopes: Option<Vec<String>>,
     #[serde(default)]
     projects: Vec<String>,
     #[serde(default)]
@@ -124,6 +145,7 @@ struct RawSource {
     conventions: Option<String>,
     skills: Option<String>,
     mcp: Option<String>,
+    workspaces: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -252,6 +274,13 @@ fn build(root: &Path, raw: RawConfig, path: PathBuf) -> Result<Config> {
         }),
         skills: rel(raw.source.skills, "skills"),
         mcp: rel(raw.source.mcp, "mcp.toml"),
+        // Unset, it is on only once the canon has the file, so a canon from
+        // before it never tells its workspaces to read a file that is not there.
+        workspace_rules: match raw.source.workspaces {
+            Some(value) => rel(Some(value), ""),
+            None if root.join(WORKSPACE_RULES).is_file() => root.join(WORKSPACE_RULES),
+            None => PathBuf::new(),
+        },
     };
 
     let mut agents = defaults();
@@ -330,10 +359,27 @@ fn build(root: &Path, raw: RawConfig, path: PathBuf) -> Result<Config> {
             key,
         });
     }
+    // A file with `projects` and no `scopes` is from before 0.5.0, when
+    // `projects` named the folders to look through.
+    let legacy_projects = raw.scopes.is_none() && !raw.projects.is_empty();
+    let (scopes, projects) = match raw.scopes {
+        Some(scopes) => (scopes, raw.projects),
+        None => (raw.projects, Vec::new()),
+    };
+    for value in &projects {
+        if !value.starts_with('~') && !value.starts_with('/') {
+            bail!(
+                "`{value}` under `projects` in `{}` is not a full path: start it with ~ or /",
+                tilde(&path)
+            );
+        }
+    }
     Ok(Config {
         source,
         agents,
-        projects: raw.projects.iter().map(|p| expand(p)).collect(),
+        scopes: scopes.iter().map(|p| expand(p)).collect(),
+        projects: projects.iter().map(|p| expand(p)).collect(),
+        legacy_projects,
         workspaces,
         path,
         shortcut: source_dir(),
@@ -630,6 +676,137 @@ pub fn set_workspace(path: &Path, key: &str, projects: Option<&[String]>) -> Res
     Ok(())
 }
 
+/// Set the top-level list `key` to `values`, so a list written over several
+/// lines and every comment survive; a comment after the old value stays after
+/// the new one. The file is left as it was when the result would not load.
+pub fn set_list(path: &Path, key: &str, values: &[String]) -> Result<()> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("could not read `{}`", tilde(path)))?;
+    let doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("`{}` is not valid", tilde(path)))?;
+    if doc.get(key).is_none() {
+        let items: Vec<String> = values.iter().map(|v| format!("{v:?}")).collect();
+        return set_key(path, key, &format!("[{}]", items.join(", ")), false).map(|_| ());
+    }
+    edit(path, key, |doc| {
+        if let Some(old) = doc.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+            let mut value = toml_edit::Value::Array(values.iter().map(String::as_str).collect());
+            *value.decor_mut() = old.decor().clone();
+            *old = value;
+        }
+        Ok(())
+    })
+}
+
+/// Add the folder `project` (as `tilde` writes it) to `projects`, or take it
+/// out with `keep` false, matched by its path whichever way the list spells it.
+/// A config from before 0.5.0 has its `projects` renamed to `scopes` first, and
+/// one with neither gets `scopes = []`, so the list is never read as scopes.
+pub fn set_project(path: &Path, project: &str, keep: bool) -> Result<()> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("could not read `{}`", tilde(path)))?;
+    let doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("`{}` is not valid", tilde(path)))?;
+    if !doc.contains_key("scopes") {
+        if doc.contains_key("projects") {
+            rename_key(path, "projects", "scopes")?;
+        } else {
+            set_key(path, "scopes", "[]", false)?;
+        }
+    }
+    let text =
+        fs::read_to_string(path).with_context(|| format!("could not read `{}`", tilde(path)))?;
+    let doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("`{}` is not valid", tilde(path)))?;
+    let mut list: Vec<String> = doc
+        .get("projects")
+        .and_then(toml_edit::Item::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let want = expand(project);
+    let real = fs::canonicalize(&want).ok();
+    let same = |entry: &str| {
+        let p = expand(entry);
+        p == want || (real.is_some() && fs::canonicalize(&p).ok() == real)
+    };
+    let had = list.iter().any(|e| same(e));
+    match (keep, had) {
+        (true, true) | (false, false) => return Ok(()),
+        (true, false) => list.push(project.to_string()),
+        (false, true) => list.retain(|e| !same(e)),
+    }
+    set_list(path, "projects", &list)
+}
+
+/// Rename the top-level key `from` to `to` on its own line, so the comments
+/// around it and a list written over several lines stay as they are; nothing
+/// is written when `to` is already there or `from` is not.
+pub fn rename_key(path: &Path, from: &str, to: &str) -> Result<()> {
+    edit(path, from, |doc| {
+        if doc.contains_key(to) || !doc.contains_key(from) {
+            return Ok(());
+        }
+        let text = doc.to_string();
+        let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+        for line in &mut lines {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('[') {
+                break;
+            }
+            let Some(rest) = trimmed.strip_prefix(from) else {
+                continue;
+            };
+            if rest.trim_start().starts_with('=') {
+                let indent = &line[..line.len() - trimmed.len()];
+                *line = format!("{indent}{to}{rest}");
+                break;
+            }
+        }
+        let mut body = lines.join("\n");
+        body.push('\n');
+        *doc = body
+            .parse()
+            .with_context(|| format!("`{}` would not be valid", tilde(path)))?;
+        Ok(())
+    })
+}
+
+/// Edit `canonize.toml` as a document, putting it back exactly as it was when
+/// the result would not load; `key` names the setting in the error.
+fn edit(
+    path: &Path,
+    key: &str,
+    change: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>,
+) -> Result<()> {
+    let text =
+        fs::read_to_string(path).with_context(|| format!("could not read `{}`", tilde(path)))?;
+    let mut doc: toml_edit::DocumentMut = text
+        .parse()
+        .with_context(|| format!("`{}` is not valid", tilde(path)))?;
+    change(&mut doc)?;
+    let body = doc.to_string();
+    if body == text {
+        return Ok(());
+    }
+    fs::write(path, &body).with_context(|| format!("could not write `{}`", tilde(path)))?;
+    let root = path.parent().unwrap_or(Path::new("."));
+    if let Err(e) = load_from(root) {
+        fs::write(path, &text).with_context(|| format!("could not write `{}`", tilde(path)))?;
+        bail!(
+            "`{key}` was not changed, since the config then reads: {}",
+            crate::said(&e)
+        );
+    }
+    Ok(())
+}
+
 /// The comment above a `[workspaces]` table canonize starts in a config that
 /// has none, the same words `canon init` writes.
 const WORKSPACES_NOTE: &str = "
@@ -773,14 +950,43 @@ mod tests {
     fn written_config(t: &Temp) -> PathBuf {
         t.write(
             CONFIG_FILE,
-            &crate::init::config_text(
-                "[]",
-                "rules.yaml",
-                "rules.schema.json",
-                "house/*.md",
-                "skills",
-            ),
+            &crate::init::config_text(&crate::init::Answers {
+                scopes: "[]",
+                projects: "[]",
+                rules: "rules.yaml",
+                schema: "rules.schema.json",
+                house: "house/*.md",
+                skills: "skills",
+                workspaces: "",
+            }),
         )
+    }
+
+    #[test]
+    fn a_config_from_before_0_5_0_reads_its_projects_as_scopes_until_renamed() {
+        let t = Temp::new();
+        let (dev, app) = (t.dir("dev"), t.dir("app"));
+        t.write(
+            "canonize.toml",
+            &format!("projects = [{:?}]\n[source]\nrules = \"\"\n", dev.display()),
+        );
+        let cfg = load_from(t.path()).expect("a 0.4 file should still load");
+        assert_eq!(
+            cfg.scopes,
+            [dev.clone()],
+            "before 0.5.0 `projects` named the folders to look through"
+        );
+        assert!(cfg.projects.is_empty());
+        assert!(
+            cfg.legacy_projects,
+            "the old name is drift, so `fix` can rename it"
+        );
+
+        set_project(&cfg.path, &app.display().to_string(), true).expect("it should write");
+        let cfg = load_from(t.path()).expect("it should still load");
+        assert_eq!(cfg.scopes, [dev], "the rename keeps the folders to look through");
+        assert_eq!(cfg.projects, [app], "the project went under the new `projects`");
+        assert!(!cfg.legacy_projects);
     }
 
     #[test]

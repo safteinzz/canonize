@@ -4,6 +4,7 @@
 //! convention and MCP server it can have.
 
 use super::confirm::{Action, Confirm};
+use super::job::Then;
 use super::link_form::LinkForm;
 use super::{App, Edit, gate_title};
 use crate::cli::house_label;
@@ -21,6 +22,8 @@ pub(super) enum SpaceLine {
     File(usize),
     /// One of its projects, by index into `Entry::projects`.
     Project(usize),
+    /// The canon's file every workspace follows.
+    Rules,
     /// Its CONTEXT.md, the user's.
     Context,
     /// A convention of the canon, by column.
@@ -39,11 +42,11 @@ impl App {
             return self.space_card_key(key);
         }
         let rows = self.space_rows().len();
+        if let Some(to) = self.motion(key, self.wrow, rows) {
+            self.wrow = to;
+            return Some(None);
+        }
         match key.code {
-            Down | Char('j') => self.wrow = (self.wrow + 1).min(rows.saturating_sub(1)),
-            Up | Char('k') => self.wrow = self.wrow.saturating_sub(1),
-            Char('g') | Home => self.wrow = 0,
-            Char('G') | End => self.wrow = rows.saturating_sub(1),
             Enter => match self.space() {
                 Some(_) => {
                     self.in_space = true;
@@ -63,11 +66,11 @@ impl App {
     fn space_card_key(&mut self, key: KeyEvent) -> Option<Option<Edit>> {
         use KeyCode::*;
         let lines = self.space_lines().len();
+        if let Some(to) = self.motion(key, self.sline, lines) {
+            self.sline = to;
+            return Some(None);
+        }
         match key.code {
-            Down | Char('j') => self.sline = (self.sline + 1).min(lines.saturating_sub(1)),
-            Up | Char('k') => self.sline = self.sline.saturating_sub(1),
-            Char('g') | Home => self.sline = 0,
-            Char('G') | End => self.sline = lines.saturating_sub(1),
             Esc => self.in_space = false,
             Enter | Char(' ') => return Some(self.space_enter()),
             Char('f') => self.space_fix_line(),
@@ -120,6 +123,9 @@ impl App {
                 out.push(SpaceLine::File(a));
             }
         }
+        if self.cfg.as_ref().and_then(workspaces::rules).is_some() {
+            out.push(SpaceLine::Rules);
+        }
         out.push(SpaceLine::Context);
         out.extend((0..e.projects.len()).map(SpaceLine::Project));
         out.extend((0..p.house.len()).map(SpaceLine::Convention));
@@ -136,16 +142,18 @@ impl App {
         self.space_lines().get(self.sline).copied()
     }
 
-    /// The projects canonize found, by the name `canon status` prints, but
-    /// for the ones in `skip`.
-    fn project_names(&self, skip: &[PathBuf]) -> Vec<String> {
+    /// The projects canonize knows, by the name `canon status` prints, but
+    /// for the ones in `skip`, then the folders under the scopes that are not
+    /// one yet, marked so.
+    fn project_names(&self, skip: &[PathBuf]) -> Vec<(String, bool)> {
         let (Some(cfg), Some(p)) = (&self.cfg, &self.projects) else {
             return Vec::new();
         };
         p.list
             .iter()
             .filter(|x| !skip.contains(&x.root))
-            .map(|x| projects::short(cfg, &x.root))
+            .map(|x| (projects::short(cfg, &x.root), false))
+            .chain(p.candidates.iter().map(|d| (projects::short(cfg, d), true)))
             .collect()
     }
 
@@ -153,16 +161,27 @@ impl App {
     /// and the files after it, stopping at the first that fails. A refusal
     /// stays in the form.
     pub(super) fn save_link(&mut self, workspace: String, project: String) {
+        let typed = self.under_scope(&project);
         let (Some(cfg), Some(p), Some(form)) = (&self.cfg, &self.projects, &mut self.link_form)
         else {
             return;
         };
-        let planned = crate::cli::project_index(cfg, p, &project).and_then(|i| {
-            let root = p.list[i].root.clone();
+        // A folder that is not a project yet becomes one in the same run.
+        let target = crate::cli::project_index(cfg, p, &project)
+            .map(|i| (p.list[i].root.clone(), None))
+            .or_else(|unknown| {
+                let at = crate::config::expand(&typed);
+                if !at.is_dir() {
+                    return Err(unknown);
+                }
+                let add = projects::adding(cfg, p, &typed)?;
+                Ok((std::fs::canonicalize(&at).unwrap_or(at), Some(add)))
+            });
+        let planned = target.and_then(|(root, add)| {
             crate::workspaces::link(cfg, p, &workspace, std::slice::from_ref(&root))
-                .map(|l| (l, root))
+                .map(|l| (l, root, add))
         });
-        let (l, root) = match planned {
+        let (l, root, add) = match planned {
             Ok(x) => x,
             Err(e) => {
                 form.error = Some(crate::said(&e));
@@ -178,9 +197,10 @@ impl App {
             .collect();
         let key = l.key.clone();
         let foreign = l.entry.foreign();
-        let changes: Vec<Change> = l
-            .setting
+        let added = add.is_some();
+        let changes: Vec<Change> = add
             .into_iter()
+            .chain(l.setting)
             .chain(l.entry.file_fixes(None))
             .collect();
         self.link_form = None;
@@ -188,14 +208,32 @@ impl App {
             self.set_status(format!("{key} already points at {name}"));
             return;
         }
-        let what = format!("point {key} at {name}");
-        self.run_changes("link", vec![Change::Batch { what, changes }]);
-        if self.note.is_none() && !self.status_failed {
-            match foreign.first() {
-                Some(why) => self.set_failed(format!("{why}: move it aside, then f")),
-                None => self.set_status(format!("{key} points at {}", all.join(", "))),
-            }
-        }
+        let what = if added {
+            format!("add {name} as a project and point {key} at it")
+        } else {
+            format!("point {key} at {name}")
+        };
+        let message = if added {
+            format!(
+                "{name} is a project now, and {key} points at {}",
+                all.join(", ")
+            )
+        } else {
+            format!("{key} points at {}", all.join(", "))
+        };
+        self.start(
+            "link",
+            vec![Change::Batch { what, changes }],
+            Then::Linked {
+                key,
+                message,
+                foreign: foreign.first().cloned(),
+            },
+        );
+    }
+
+    /// Put the workspaces tab's cursor on the workspace `key`.
+    pub(super) fn select_space(&mut self, key: &str) {
         if let Some(s) = &self.spaces
             && let Some(i) = s.list.iter().position(|e| e.key == key)
             && let Some(r) = self.space_rows().iter().position(|&x| x == i)
@@ -225,7 +263,7 @@ impl App {
                     .map(|why| format!("{why}: move it aside, then f"))
             };
             match why {
-                Some(why) => self.set_failed(why),
+                Some(why) => self.report_failure("fix", why),
                 None if !e.here => self.set_status(format!("{root} is not on this machine")),
                 None => self.set_status(format!("{root} has nothing to fix")),
             }
@@ -256,7 +294,7 @@ impl App {
         match self.space_line()? {
             SpaceLine::File(a) => self.space_file(a, true),
             SpaceLine::Project(_) => self.set_status("a adds a project · d drops this one"),
-            SpaceLine::Context => return self.space_open(),
+            SpaceLine::Context | SpaceLine::Rules => return self.space_open(),
             SpaceLine::Convention(c) => self.space_convention(c, None),
             SpaceLine::Server(k) => self.space_server(k, None),
         }
@@ -281,6 +319,12 @@ impl App {
             Some(SpaceLine::Project(k)) => self.drop_project(k),
             Some(SpaceLine::Context) => self.set_status(format!(
                 "{CONTEXT_FILE} is yours: canonize never deletes it"
+            )),
+            Some(SpaceLine::Rules) => self.set_status(format!(
+                "{} is your canon's: canonize never deletes it",
+                self.cfg
+                    .as_ref()
+                    .map_or_else(String::new, |c| file_name(&c.source.workspace_rules))
             )),
             Some(SpaceLine::Convention(c)) => self.space_convention(c, Some(false)),
             Some(SpaceLine::Server(k)) => self.space_server(k, Some(false)),
@@ -307,7 +351,7 @@ impl App {
                 (_, false) => (false, format!("canonize wrote no {name} in {root}")),
             };
             if failed {
-                self.set_failed(msg);
+                self.report_failure(&name, msg);
             } else {
                 self.set_status(msg);
             }
@@ -468,7 +512,7 @@ impl App {
                 _ => (false, format!("{root} does not have {name}")),
             };
             if failed {
-                self.set_failed(msg);
+                self.report_failure(&name, msg);
             } else {
                 self.set_status(msg);
             }
@@ -511,8 +555,8 @@ impl App {
     }
 
     /// The file `o` opens on the card's line: the workspace's file, the
-    /// project's own, CONTEXT.md (there or about to be), or the CANON.md a
-    /// convention import sits in.
+    /// project's own, CONTEXT.md or the canon's workspaces.md (there or about
+    /// to be), or the CANON.md a convention import sits in.
     pub(super) fn space_file_at(&self) -> Option<PathBuf> {
         let (_, e) = self.entry()?;
         if !e.here {
@@ -531,6 +575,9 @@ impl App {
                     .clone()
             }
             SpaceLine::Context => return Some(e.root.join(CONTEXT_FILE)),
+            SpaceLine::Rules => {
+                return workspaces::rules(self.cfg.as_ref()?).map(Path::to_path_buf);
+            }
             SpaceLine::Convention(_) => e.root.join(CANON_FILE),
             SpaceLine::Server(_) => return None,
         };

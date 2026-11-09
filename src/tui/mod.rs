@@ -4,9 +4,12 @@
 
 mod alert;
 mod confirm;
+mod job;
 mod line_edit;
 mod link_form;
 mod mcp;
+mod project_form;
+mod project_tab;
 mod render;
 mod scope;
 mod server_form;
@@ -31,7 +34,9 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use job::{Data, Job, Then};
 use link_form::{LinkForm, Linked};
+use project_form::{Named, ProjectForm};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use scope::{Picked, Scope};
@@ -65,6 +70,7 @@ pub(super) enum HouseRow {
 pub(super) enum View {
     Agents,
     Skills,
+    Projects,
     Houses,
     Workspaces,
     Mcp,
@@ -101,6 +107,9 @@ pub(super) struct App {
     pub(super) mcol: usize,
     /// The workspaces tab's row, an index into `space_rows`.
     pub(super) wrow: usize,
+    /// The projects tab's row, an index into `proj_rows`.
+    pub(super) jrow: usize,
+    pub(super) jtop: Cell<usize>,
     /// Whether the workspaces tab's keys go to the card (after Enter) or the list.
     pub(super) in_space: bool,
     /// The selected line of the workspace's card, an index into `space_lines`.
@@ -127,11 +136,19 @@ pub(super) struct App {
     /// A folder being linked to projects, from the workspaces tab's `c` or the
     /// card's `a`.
     pub(super) link_form: Option<LinkForm>,
+    /// A folder being named a project, from the conventions tab's `c`.
+    pub(super) project_form: Option<ProjectForm>,
+    /// The folder to put the projects tab's cursor on once the offer making
+    /// it a project has run.
+    added: Option<PathBuf>,
     /// A box that is only read. It owns every key until closed.
     pub(super) note: Option<Note>,
     pub(super) show_help: bool,
     /// The first help row on screen; `render_help` clamps it to the end.
     pub(super) help_scroll: Cell<usize>,
+    /// The rows the list in front of the user showed on the last frame,
+    /// which `motion` halves for `ctrl-d/u` and the page keys.
+    pub(super) page: Cell<usize>,
     /// The `/` filter over the current tab's rows, dropped when the tab changes.
     pub(super) query: String,
     /// The cursor in `query`, as characters after it (`line_edit::edit`).
@@ -141,6 +158,10 @@ pub(super) struct App {
     pub(super) status: String,
     pub(super) status_failed: bool,
     pub(super) status_at: Option<Instant>,
+    /// Changes or a refresh running in the background.
+    pub(super) job: Option<Job>,
+    /// A job's failure waiting for the box in front of it to close.
+    held: Option<Note>,
     should_quit: bool,
 }
 
@@ -148,7 +169,7 @@ pub(super) struct App {
 struct Edit(PathBuf);
 
 impl App {
-    fn new() -> App {
+    fn new(data: Result<Data, String>) -> App {
         let mut app = App {
             load_error: None,
             cfg: None,
@@ -169,6 +190,8 @@ impl App {
             mcol: 0,
             mtop: Cell::new(0),
             wrow: 0,
+            jrow: 0,
+            jtop: Cell::new(0),
             in_space: false,
             sline: 0,
             wtop: Cell::new(0),
@@ -181,43 +204,52 @@ impl App {
             wizard: None,
             server_form: None,
             link_form: None,
+            project_form: None,
+            added: None,
             note: None,
             show_help: false,
             help_scroll: Cell::new(0),
+            page: Cell::new(0),
             query: String::new(),
             query_back: 0,
             searching: false,
             status: String::new(),
             status_failed: false,
             status_at: None,
+            job: None,
+            held: None,
             should_quit: false,
         };
-        app.reload();
-        if app.load_error.is_some() {
+        app.apply(data);
+        if app.unset() {
             app.propose_setup();
         }
         app
     }
 
-    /// Read the config and the disk again. Called after every change, so the
-    /// table never shows a state it has not just looked at.
+    /// Read the config and the disk again on this thread, for the few changes
+    /// that need what they wrote before going on.
     fn reload(&mut self) {
+        self.apply(job::read());
+    }
+
+    /// Show what a read found, keeping each cursor on the row it is on.
+    fn apply(&mut self, data: Result<Data, String>) {
         // The skill under the cursor, so a change that reorders the rows (an
         // adopt, say) leaves the cursor on the same skill.
         let skill = self.plan.as_ref().and_then(|p| {
             let r = *self.skill_list().get(self.srow)?;
             Some(p.rows[r].label())
         });
-        match config::load() {
-            Ok(cfg) => {
-                self.plan = Some(Plan::build(&cfg));
-                let projects = Projects::build(&cfg);
-                self.mcps = Some(Mcps::build(&cfg, &projects));
-                self.spaces = Some(Workspaces::build(&cfg, &projects));
-                self.projects = Some(projects);
-                self.houses = Some(Houses::build(&cfg));
-                self.report = Some(check::run(&cfg.source));
-                self.cfg = Some(cfg);
+        match data {
+            Ok(d) => {
+                self.plan = Some(d.plan);
+                self.mcps = Some(d.mcps);
+                self.spaces = Some(d.spaces);
+                self.projects = Some(d.projects);
+                self.houses = Some(d.houses);
+                self.report = Some(d.report);
+                self.cfg = Some(d.cfg);
                 self.load_error = None;
             }
             Err(e) => {
@@ -228,11 +260,13 @@ impl App {
                 self.mcps = None;
                 self.spaces = None;
                 self.report = None;
-                self.load_error = Some(crate::said(&e));
+                self.load_error = Some(e);
             }
         }
-        let (_, cols) = self.size();
-        self.col = self.col.min(cols.saturating_sub(1));
+        let installed = self.installed_agents();
+        if !installed.contains(&self.col) {
+            self.col = installed.first().copied().unwrap_or(0);
+        }
         self.aline = self.aline.min(self.card_lines().len().saturating_sub(1));
         let skills = self.skill_list();
         self.srow = self.srow.min(skills.len().saturating_sub(1));
@@ -250,16 +284,9 @@ impl App {
             self.mcol = self.mcol.min(m.servers.len().saturating_sub(1));
         }
         self.wrow = self.wrow.min(self.space_rows().len().saturating_sub(1));
+        self.jrow = self.jrow.min(self.proj_rows().len().saturating_sub(1));
         self.in_space &= self.space().is_some();
         self.sline = self.sline.min(self.space_lines().len().saturating_sub(1));
-    }
-
-    /// Rows and columns (agents) on screen.
-    pub(super) fn size(&self) -> (usize, usize) {
-        match (&self.plan, &self.cfg) {
-            (Some(p), Some(c)) => (p.rows.len(), c.agents.len()),
-            _ => (0, 0),
-        }
     }
 
     pub(super) fn set_status(&mut self, msg: impl Into<String>) {
@@ -271,6 +298,23 @@ impl App {
     pub(super) fn set_failed(&mut self, msg: impl Into<String>) {
         self.set_status(msg);
         self.status_failed = true;
+    }
+
+    /// A failure where it fits: the status line when one line holds it, else
+    /// an alert titled `title`, held while a box is open so it never replaces
+    /// one.
+    pub(super) fn report_failure(&mut self, title: &str, msg: String) {
+        if msg.chars().count() <= 80 && !msg.contains('\n') {
+            self.set_failed(msg);
+        } else {
+            self.held = Some(Note::alert(title.to_string(), msg));
+        }
+    }
+
+    /// Whether there is no canonize.toml at all, as against one that does
+    /// not load: only the first is set up, the second is edited.
+    pub(super) fn unset(&self) -> bool {
+        self.load_error.is_some() && !config::source_dir().join(config::CONFIG_FILE).exists()
     }
 
     pub(super) fn live_status(&self) -> Option<&str> {
@@ -286,6 +330,7 @@ impl App {
             || self.note.is_some()
             || self.server_form.is_some()
             || self.link_form.is_some()
+            || self.project_form.is_some()
             || self.confirm.is_some()
             || self.typed.is_some()
             || self.scope.is_some()
@@ -349,6 +394,17 @@ impl App {
             }
             return None;
         }
+        if let Some(form) = &mut self.project_form {
+            match form.key(key) {
+                Named::Pending => {}
+                Named::Cancelled => {
+                    self.project_form = None;
+                    self.set_status("cancelled");
+                }
+                Named::Done(folder) => self.save_project(&folder),
+            }
+            return None;
+        }
         if let Some(c) = &mut self.confirm {
             match c.key(key) {
                 Answer::Pending => {}
@@ -372,7 +428,7 @@ impl App {
                 }
                 Typing::Confirmed => {
                     let t = self.typed.take()?;
-                    self.run_changes(&t.title, t.changes);
+                    self.start(&t.title, t.changes, Then::Report);
                 }
             }
             return None;
@@ -398,9 +454,10 @@ impl App {
 
         use KeyCode::*;
         if matches!(key.code, Tab | BackTab) {
-            const VIEWS: [View; 5] = [
+            const VIEWS: [View; 6] = [
                 View::Agents,
                 View::Skills,
+                View::Projects,
                 View::Houses,
                 View::Workspaces,
                 View::Mcp,
@@ -439,6 +496,11 @@ impl App {
         {
             return edit;
         }
+        if self.view == View::Projects
+            && let Some(edit) = self.project_key(key)
+        {
+            return edit;
+        }
         if self.view == View::Workspaces
             && let Some(edit) = self.space_key(key)
         {
@@ -447,29 +509,17 @@ impl App {
         if self.view == View::Houses {
             let rows = self.house_rows();
             let cols = self.projects.as_ref().map_or(0, |p| p.house.len());
+            if let Some(to) = self.motion(key, self.prow, rows) {
+                self.prow = to;
+                return None;
+            }
             match key.code {
-                Down | Char('j') => {
-                    self.prow = (self.prow + 1).min(rows.saturating_sub(1));
-                    return None;
-                }
-                Up | Char('k') => {
-                    self.prow = self.prow.saturating_sub(1);
-                    return None;
-                }
                 Right | Char('l') => {
                     self.pcol = (self.pcol + 1).min(cols.saturating_sub(1));
                     return None;
                 }
                 Left | Char('h') => {
                     self.pcol = self.pcol.saturating_sub(1);
-                    return None;
-                }
-                Char('g') | Home => {
-                    self.prow = 0;
-                    return None;
-                }
-                Char('G') | End => {
-                    self.prow = rows.saturating_sub(1);
                     return None;
                 }
                 Char('f') => {
@@ -496,6 +546,7 @@ impl App {
                             .as_ref()?
                             .list
                             .get(i)
+                            .filter(|x| x.host.is_file())
                             .map(|x| Edit(x.host.clone())),
                         HouseRow::Agent(a) => {
                             let at = &self.houses.as_ref()?.cells.get(self.pcol)?.get(a)?.at;
@@ -525,12 +576,13 @@ impl App {
             }
         }
         // Keys only the agents tab has must not reach it from the houses tab.
-        if matches!(self.view, View::Houses | View::Workspaces | View::Mcp)
-            && matches!(key.code, Char('f' | 'd') | Enter)
+        if matches!(
+            self.view,
+            View::Projects | View::Houses | View::Workspaces | View::Mcp
+        ) && matches!(key.code, Char('f' | 'd') | Enter)
         {
             return None;
         }
-        let (_, agents) = self.size();
         let lines = self.card_lines().len();
         let skills = self.skill_list().len();
         // Agents: j/k walks the list, or the card once Enter has opened it.
@@ -539,21 +591,17 @@ impl App {
             let shown = self.agent_rows();
             let at = shown.iter().position(|&a| a == self.col);
             if !self.in_card {
-                let to = match key.code {
-                    Down | Char('j') => at.map_or(0, |i| i + 1).min(shown.len().saturating_sub(1)),
-                    Up | Char('k') => at.map_or(0, |i| i.saturating_sub(1)),
-                    Char('g') | Home => 0,
-                    Char('G') | End => shown.len().saturating_sub(1),
-                    Enter => {
-                        self.in_card = at.is_some();
-                        return None;
-                    }
-                    _ => usize::MAX,
-                };
-                if to != usize::MAX {
+                if let Some(to) = self.motion(key, at.unwrap_or(0), shown.len()) {
+                    // With no agent of the list under the cursor, a motion
+                    // lands on its first row.
+                    let to = if at.is_some() { to } else { 0 };
                     if let Some(&a) = shown.get(to) {
                         self.col = a;
                     }
+                    return None;
+                }
+                if key.code == Enter {
+                    self.in_card = at.is_some();
                     return None;
                 }
             }
@@ -567,39 +615,77 @@ impl App {
                 return None;
             }
         }
-        let mut none = 0usize;
-        let (vert, vert_max, horiz, horiz_max) = match self.view {
-            View::Skills => (&mut self.srow, skills, &mut self.col, agents),
-            _ => (&mut self.aline, lines, &mut none, 0),
+        if self.view == View::Skills && matches!(key.code, Right | Left | Char('l' | 'h')) {
+            let shown = self.installed_agents();
+            let at = shown.iter().position(|&a| a == self.col).unwrap_or(0);
+            let to = if matches!(key.code, Right | Char('l')) {
+                (at + 1).min(shown.len().saturating_sub(1))
+            } else {
+                at.saturating_sub(1)
+            };
+            if let Some(&a) = shown.get(to) {
+                self.col = a;
+            }
+            return None;
+        }
+        let (at, rows) = match self.view {
+            View::Skills => (self.srow, skills),
+            _ => (self.aline, lines),
         };
-        match key.code {
-            Down | Char('j') => {
-                *vert = (*vert + 1).min(vert_max.saturating_sub(1));
-                return None;
+        if let Some(to) = self.motion(key, at, rows) {
+            match self.view {
+                View::Skills => self.srow = to,
+                _ => self.aline = to,
             }
-            Up | Char('k') => {
-                *vert = vert.saturating_sub(1);
-                return None;
-            }
-            Right | Char('l') => {
-                *horiz = (*horiz + 1).min(horiz_max.saturating_sub(1));
-                return None;
-            }
-            Left | Char('h') => {
-                *horiz = horiz.saturating_sub(1);
-                return None;
-            }
-            Char('g') | Home => {
-                *vert = 0;
-                return None;
-            }
-            Char('G') | End => {
-                *vert = vert_max.saturating_sub(1);
-                return None;
-            }
-            _ => {}
+            return None;
         }
         self.anywhere(key)
+    }
+
+    /// Where a motion key takes a cursor at `at` in a list of `rows`: `j/k`
+    /// and the arrows a row, `ctrl-d/u` and the page keys half the rows the
+    /// list showed on its last frame (`page`), `g/G`, Home and End to either
+    /// end; `None` for any other key. Every list asks it before its own keys,
+    /// so `ctrl-d` never reaches a `d`.
+    pub(super) fn motion(&self, key: KeyEvent, at: usize, rows: usize) -> Option<usize> {
+        use KeyCode::*;
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let half = (self.page.get() / 2).max(1);
+        let to = match key.code {
+            Down | Char('j') => at + 1,
+            Up | Char('k') => at.saturating_sub(1),
+            PageDown => at + half,
+            PageUp => at.saturating_sub(half),
+            Char('d') if ctrl => at + half,
+            Char('u') if ctrl => at.saturating_sub(half),
+            Char('g') | Home => 0,
+            Char('G') | End => usize::MAX,
+            _ => return None,
+        };
+        Some(to.min(rows.saturating_sub(1)))
+    }
+
+    /// The help group of the screen in front of the user, by its heading in
+    /// `render::HELP`: the card's inside one, the wizard's on the welcome
+    /// screen, none on a broken config (only the shared keys work there),
+    /// else the tab's.
+    pub(super) fn help_group(&self) -> &'static str {
+        if self.unset() {
+            return "in set up";
+        }
+        if self.load_error.is_some() {
+            return "";
+        }
+        match self.view {
+            View::Agents if self.in_card => "in an agent's card",
+            View::Agents => "agents",
+            View::Skills => "skills",
+            View::Projects => "projects",
+            View::Houses => "conventions",
+            View::Workspaces if self.in_space => "in a workspace's card",
+            View::Workspaces => "workspaces",
+            View::Mcp => "mcps",
+        }
     }
 
     /// Keys while the help is up: it scrolls, and closes on esc, `q` or `?`.
@@ -632,15 +718,18 @@ impl App {
                 self.show_help = true;
                 self.help_scroll.set(0);
             }
-            Char('r') => {
-                self.reload();
-                self.set_status("refreshed");
+            Char('r') if self.job.is_none() => {
+                self.start(
+                    "refreshing",
+                    Vec::new(),
+                    Then::Refreshed("refreshed".into()),
+                );
             }
             Char('f') | Enter => self.agent_cell(true),
-            Char('F') => self.offer_fix_all(),
+            Char('F') if self.job.is_none() => self.offer_fix_all(),
             Char('d') => self.agent_cell(false),
             Char('v') => self.show_check(),
-            Char('s') if self.load_error.is_some() => self.propose_setup(),
+            Char('s') if self.unset() => self.propose_setup(),
             Char('E') => {
                 return Some(Edit(match &self.cfg {
                     Some(c) => c.path.clone(),
@@ -697,6 +786,14 @@ impl App {
                     "every broken convention import and CANON.md wiring",
                 )
             }
+            View::Projects => (
+                self.cfg
+                    .as_ref()
+                    .filter(|c| c.legacy_projects)
+                    .map(|c| vec![crate::projects::renaming(c)])
+                    .unwrap_or_default(),
+                "the projects setting",
+            ),
             View::Workspaces => {
                 let mut c = self
                     .spaces
@@ -1200,32 +1297,60 @@ impl App {
         });
     }
 
-    /// What the `/` filter keeps of a row named `name`: all of them with no
-    /// query, else the ones holding it, case aside, or holding its characters
-    /// in order, so `cl` finds `dev/crates/cli`.
-    fn kept(&self, name: &str) -> bool {
+    /// What the `/` filter keeps of `rows`, each named by `name`, in their
+    /// order: all of them with no query, else the ones holding it, case aside,
+    /// and only when none does, the ones holding its characters in order, so
+    /// `cl` still finds `dev/crates/cli` while `api` never drowns the `api`
+    /// folder in every long name that happens to spell it out.
+    fn kept<T: Copy>(&self, rows: Vec<T>, name: impl Fn(T) -> String) -> Vec<T> {
         let q = self.query.trim().to_lowercase();
-        let name = name.to_lowercase();
-        let mut chars = name.chars();
-        q.is_empty() || name.contains(&q) || q.chars().all(|c| chars.any(|h| h == c))
+        if q.is_empty() {
+            return rows;
+        }
+        let named: Vec<(T, String)> = rows
+            .into_iter()
+            .map(|r| (r, name(r).to_lowercase()))
+            .collect();
+        let holding: Vec<T> = named
+            .iter()
+            .filter(|(_, n)| n.contains(&q))
+            .map(|(r, _)| *r)
+            .collect();
+        if !holding.is_empty() {
+            return holding;
+        }
+        named
+            .into_iter()
+            .filter(|(_, n)| {
+                let mut chars = n.chars();
+                q.chars().all(|c| chars.any(|h| h == c))
+            })
+            .map(|(r, _)| r)
+            .collect()
+    }
+
+    /// The agents installed here, by index into `cfg.agents`: one that is
+    /// not has nothing canonize could show or do.
+    pub(super) fn installed_agents(&self) -> Vec<usize> {
+        self.cfg.as_ref().map_or(Vec::new(), |c| {
+            (0..c.agents.len())
+                .filter(|&a| c.agents[a].installed())
+                .collect()
+        })
     }
 
     /// The agents the agents tab lists, by index into `cfg.agents`.
     pub(super) fn agent_rows(&self) -> Vec<usize> {
-        self.cfg.as_ref().map_or(Vec::new(), |c| {
-            (0..c.agents.len())
-                .filter(|&a| self.kept(&c.agents[a].name))
-                .collect()
-        })
+        let Some(c) = &self.cfg else {
+            return Vec::new();
+        };
+        self.kept(self.installed_agents(), |a| c.agents[a].name.clone())
     }
 
     /// The skills tab's rows, as plan rows; `srow` indexes this.
     pub(super) fn skill_list(&self) -> Vec<usize> {
         self.plan.as_ref().map_or(Vec::new(), |p| {
-            p.skill_rows()
-                .into_iter()
-                .filter(|&r| self.kept(&p.rows[r].label()))
-                .collect()
+            self.kept(p.skill_rows(), |r| p.rows[r].label())
         })
     }
 
@@ -1251,10 +1376,7 @@ impl App {
 
     /// The conventions and MCP tabs' rows; `prow` and `mrow` index this.
     pub(super) fn place_rows(&self) -> Vec<HouseRow> {
-        self.all_places()
-            .into_iter()
-            .filter(|&r| self.kept(&self.place_name(r)))
-            .collect()
+        self.kept(self.all_places(), |r| self.place_name(r))
     }
 
     /// The name a workspace row goes by, which is what `/` matches: its
@@ -1274,7 +1396,7 @@ impl App {
     /// indexes this.
     pub(super) fn space_rows(&self) -> Vec<usize> {
         let n = self.spaces.as_ref().map_or(0, |s| s.list.len());
-        (0..n).filter(|&i| self.kept(&self.space_name(i))).collect()
+        self.kept((0..n).collect(), |i| self.space_name(i))
     }
 
     /// Rows in the houses tab: every agent, then every project.
@@ -1288,6 +1410,7 @@ impl App {
             View::Agents => self.agent_rows().len(),
             View::Skills => self.skill_list().len(),
             View::Houses | View::Mcp => self.house_rows(),
+            View::Projects => self.proj_rows().len(),
             View::Workspaces => self.space_rows().len(),
         }
     }
@@ -1306,6 +1429,7 @@ impl App {
         self.prow = self.prow.min(places);
         self.mrow = self.mrow.min(places);
         self.wrow = self.wrow.min(self.space_rows().len().saturating_sub(1));
+        self.jrow = self.jrow.min(self.proj_rows().len().saturating_sub(1));
     }
 
     /// A key while `/` is being typed: every letter goes into the query and the
@@ -1339,6 +1463,7 @@ impl App {
                     }
                     View::Skills => self.srow = step(self.srow),
                     View::Houses => self.prow = step(self.prow),
+                    View::Projects => self.jrow = step(self.jrow),
                     View::Workspaces => self.wrow = step(self.wrow),
                     View::Mcp => self.mrow = step(self.mrow),
                 }
@@ -1517,7 +1642,10 @@ impl App {
 
     fn run_action(&mut self, what: &str, action: Action) {
         match action {
-            Action::Changes(changes) => self.run_changes(what, changes),
+            Action::Changes(changes) => {
+                let then = self.added.take().map_or(Then::Report, Then::Select);
+                self.start(what, changes, then);
+            }
             Action::Setup(choice) => match setup::apply(&choice) {
                 Ok(()) => {
                     self.reload();
@@ -1528,29 +1656,51 @@ impl App {
         }
     }
 
-    fn run_changes(&mut self, what: &str, changes: Vec<Change>) {
-        let mut failed = Vec::new();
-        let total = changes.len();
-        for c in changes {
-            if !failed.is_empty() && c.after_all() {
-                failed.push(format!(
-                    "{}: not done, since a step before it failed",
-                    c.describe()
-                ));
-                continue;
-            }
-            if let Err(e) = c.run() {
-                failed.push(format!("{}: {}", c.describe(), crate::said(&e)));
-            }
+    /// Run `changes` in the background, then read everything again. One job
+    /// at a time, so a second waits for the user to ask again.
+    pub(super) fn start(&mut self, what: &str, changes: Vec<Change>, then: Then) {
+        if let Some(j) = &self.job {
+            self.set_status(format!("{} is still running", j.what));
+            return;
         }
-        self.reload();
-        // One short failure fits the status line; anything longer needs a box.
+        self.job = Some(Job::start(what.to_string(), changes, then));
+    }
+
+    /// Take in a job that has landed: what it read, then how it went.
+    fn poll_job(&mut self) {
+        let Some(landed) = self.job.as_ref().and_then(Job::landed) else {
+            return;
+        };
+        let Some(job) = self.job.take() else { return };
+        self.apply(landed.data);
+        let (what, total, failed) = (job.what, job.total, landed.failed);
         if failed.is_empty() {
-            self.set_status(format!("{what}: {total} done"));
-        } else if failed.len() == 1 && failed[0].chars().count() <= 80 {
-            self.set_failed(format!("{what} failed: {}", failed[0]));
+            match job.then {
+                Then::Report => self.set_status(format!("{what}: {total} done")),
+                Then::Select(root) => {
+                    self.set_status(format!("{what}: {total} done"));
+                    self.select_project(&root);
+                }
+                Then::Linked {
+                    key,
+                    message,
+                    foreign,
+                } => {
+                    match foreign {
+                        Some(why) => {
+                            self.report_failure("link", format!("{why}: move it aside, then f"));
+                        }
+                        None => self.set_status(message),
+                    }
+                    self.select_space(&key);
+                }
+                Then::Refreshed(message) => self.set_status(message),
+            }
+        } else if let [one] = failed.as_slice() {
+            self.report_failure(&format!("{what} failed"), format!("{what} failed: {one}"));
         } else {
-            self.note = Some(Note::alert(
+            // A failure never replaces a box the user is answering.
+            self.held = Some(Note::alert(
                 format!("{what} failed"),
                 format!(
                     "{} of {total} could not be done:\n\n{}",
@@ -1558,6 +1708,13 @@ impl App {
                     failed.join("\n")
                 ),
             ));
+        }
+    }
+
+    /// Show a held failure once nothing else is in front.
+    fn release_held(&mut self) {
+        if self.held.is_some() && !self.boxed() {
+            self.note = self.held.take();
         }
     }
 
@@ -1581,8 +1738,9 @@ impl App {
 
 pub fn run() -> Result<()> {
     install_panic_hook();
+    let data = job::read_at_start();
     let mut terminal = setup()?;
-    let mut app = App::new();
+    let mut app = App::new(data);
     let res = event_loop(&mut terminal, &mut app);
     teardown(&mut terminal)?;
     res
@@ -1590,9 +1748,13 @@ pub fn run() -> Result<()> {
 
 fn event_loop(terminal: &mut Term, app: &mut App) -> Result<()> {
     while !app.should_quit {
+        app.poll_job();
+        app.release_held();
         terminal.draw(|f| render::ui(f, app))?;
-        // Wake up only while a status is fading, so an idle dashboard costs nothing.
-        let timeout = if app.live_status().is_some() {
+        // Wake up only while something moves, so an idle dashboard costs nothing.
+        let timeout = if app.job.is_some() {
+            job::TICK
+        } else if app.live_status().is_some() {
             Duration::from_millis(200)
         } else {
             Duration::from_secs(3600)
@@ -1615,10 +1777,11 @@ fn event_loop(terminal: &mut Term, app: &mut App) -> Result<()> {
                 // A reload reads every project again, which takes a second on
                 // a WSL drive, and a file left as it was changes nothing.
                 Some(_) if std::fs::read(&path).ok() == before => {}
-                Some(_) => {
-                    app.reload();
-                    app.set_status(format!("reloaded after editing {}", tilde(&path)));
-                }
+                Some(_) => app.start(
+                    "refreshing",
+                    Vec::new(),
+                    Then::Refreshed(format!("reloaded after editing {}", tilde(&path))),
+                ),
                 None => {
                     app.note = Some(Note::alert(
                         "could not open the editor",

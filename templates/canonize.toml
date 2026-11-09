@@ -5,9 +5,15 @@
 # each item in quotes and separated by commas: ["~/dev", "~/work"]. A line
 # starting with # is a note and is ignored.
 
-# Folders to look through for projects (anything with a CLAUDE.md,
-# .claude/CLAUDE.md, AGENTS.md, AGENTS.override.md, CLAUDE.local.md or
-# CANON.md, up to three levels down). [] looks nowhere.
+# Folders to look through for projects: every folder under one, up to three
+# levels down, that holds a CLAUDE.md, .claude/CLAUDE.md, AGENTS.md,
+# AGENTS.override.md, CLAUDE.local.md or CANON.md is a project. [] looks nowhere.
+scopes = {scopes}
+
+# Projects you named yourself, wherever they are and whatever they hold:
+# `canon project add` writes one here, `canon project remove` takes it out.
+# A file from before 0.5.0 has `projects` alone, which is read as `scopes`
+# until `canon fix` renames it.
 projects = {projects}
 
 [source]
@@ -24,6 +30,9 @@ conventions = "{house}"
 skills = "{skills}"
 # Your MCP servers, one table each (see `canon --help`). "" for none.
 mcp    = "mcp.toml"
+# What every workspace follows, read by its agents before anything else.
+# "" for none.
+workspaces = "{workspaces}"
 
 # Folders you work in outside the repos of your projects (notes, replies, data,
 # a folder per issue), each pointed at the projects it is for, one path or a

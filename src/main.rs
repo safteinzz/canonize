@@ -56,7 +56,7 @@ const AFTER: &str = concat!(
   unwired  `fix` wires it         broken    wired wrongly, `fix` repoints it
   own      only that agent has it, `adopt` takes it into your canon
   foreign  yours or the agent's, left alone        n/a, off  cannot, turned off
-  -        not installed (agents table); elsewhere not there (`none`), no drift
+  -        not installed (shown only with -a); elsewhere not there (`none`), no drift
   unapproved  a project imports it, but Claude is not allowed to load it there
 
 \x1b[1mConventions:\x1b[0m
@@ -96,13 +96,23 @@ const LINK_ABOUT: &str =
 a folder per issue under it) at the projects it is for. Linking it again adds
 more, and `canon unlink <WORKSPACE> <PROJECT>` drops one. canonize writes a
 CLAUDE.md and an AGENTS.md at the folder's top naming each project and the
-files to read there, its conventions included, and the folder's own CONTEXT.md
-and CANON.md. CONTEXT.md is yours: notes every agent there reads, and adds to
-when told to remember something. CANON.md holds the folder's own conventions
+files to read there, its conventions included, the folder's own CONTEXT.md
+and CANON.md, and your canon's workspaces.md, what to do in every workspace.
+CONTEXT.md is yours: notes every agent there reads, and adds to when told to
+remember something. CANON.md holds the folder's own conventions
 (`canon add <CONVENTION> <WORKSPACE>`), and the TUI gives it MCP servers. An
 agent that reads instructions from parent folders reads all of it from any
 folder under it. Outside a git repo, Codex reads only the folder it starts in
 and Claude keeps MCP servers per folder: `git init` there fixes both.";
+
+/// `canon project --help`: the two ways a folder is a project.
+const PROJECT_ABOUT: &str =
+    "A project is found under your scopes (`scopes` in canonize.toml, three levels
+down) by a CLAUDE.md, AGENTS.md or other instructions file, or named here
+(`projects`), wherever it is and whatever it holds. Naming one writes only its
+line in canonize.toml: it gets a CANON.md once you give it a convention, and a
+workspace can be linked to it. `status --json` gives each project `scope`, the
+scope it was found under or null, and `listed`, whether `projects` names it.";
 
 const LONG_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -195,8 +205,14 @@ enum Cmd {
     ///   canon move house conventions             renamed, or into a folder that is there
     #[command(verbatim_doc_comment)]
     Move(cli::MoveArgs),
-    /// Change a setting in canonize.toml, comments and all
-    ///   config set <KEY> <VALUE>...   `agents.pi.skills_mode`, `projects`, `source.rules`
+    /// Name a folder a project wherever it is and whatever it holds, or forget one you named  <COMMAND>
+    ///   project add <DIR>...           listed in canonize.toml; nothing is written in the folder
+    ///   project remove <DIR|NAME>...   forget it; nothing in it changes
+    ///     -n        dry run: print what would change and change nothing
+    #[command(verbatim_doc_comment, subcommand, long_about = PROJECT_ABOUT)]
+    Project(cli::ProjectCmd),
+    /// Change a setting in canonize.toml, comments and all  <COMMAND>
+    ///   config set <KEY> <VALUE>...   `agents.pi.skills_mode`, `scopes`, `source.rules`
     ///     -n        dry run: print the line it would write and change nothing
     #[command(verbatim_doc_comment, subcommand)]
     Config(cli::ConfigCmd),
@@ -225,6 +241,7 @@ fn main() {
         Some(Cmd::Adopt(a)) => cli::adopt(a),
         Some(Cmd::Evict(a)) => cli::evict(a),
         Some(Cmd::Move(a)) => cli::move_it(a),
+        Some(Cmd::Project(c)) => cli::project(c),
         Some(Cmd::Config(c)) => cli::config(c),
         Some(Cmd::Init(a)) => cli::init(a),
         Some(Cmd::Selfie(c)) => {

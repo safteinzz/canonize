@@ -219,7 +219,7 @@ impl Wizard {
             rules,
             house: self.house[self.picked[3]].value.clone(),
             skills: self.skills.trim().trim_end_matches('/').to_string(),
-            projects: self
+            scopes: self
                 .projects
                 .split(',')
                 .map(|p| p.trim().trim_end_matches('/').to_string())
@@ -290,10 +290,7 @@ pub(super) fn render_wizard(f: &mut Frame, area: Rect, w: &Wizard) {
         Step::Schema => ("Which schema should `canon validate` hold them to?", ""),
         Step::House => ("Which are your conventions?", ""),
         Step::Skills => ("Where in your canon should your skills live?", "skills"),
-        Step::Projects => (
-            "Where are your projects? canonize shows which conventions each one imports.",
-            "projects",
-        ),
+        Step::Projects => ("Where should canonize look for projects?", "scopes"),
     };
     lines.push(Line::raw(question));
     lines.push(Line::raw(""));
@@ -347,7 +344,7 @@ pub(super) fn render_wizard(f: &mut Frame, area: Rect, w: &Wizard) {
                     note.push("It does not exist yet; setup creates it.".into());
                 }
             } else if w.step == Step::Projects {
-                note.push("Folders, comma separated. canonize looks up to three levels down for a CLAUDE.md, AGENTS.md or other instructions file, or leave it empty to skip projects.".into());
+                note.push("Folders, comma separated. Every folder under one, up to three levels down, with a CLAUDE.md, AGENTS.md or other instructions file is a project, and the Projects tab adds any other. Leave it empty to look nowhere.".into());
                 if !crate::projects::guess().is_empty() {
                     note.push("Pre-filled with the usual project folders that exist here.".into());
                 }

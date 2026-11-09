@@ -33,6 +33,7 @@ Sleep 1s
 Tab
 Tab
 Tab
+Tab
 Sleep 300ms
 Show
 Sleep 1.5s

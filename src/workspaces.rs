@@ -462,7 +462,7 @@ pub fn entry(cfg: &Config, projects: &Projects, key: &str, root: &Path, list: &[
         .zip(&brought)
         .map(|(p, c)| (p.clone(), reads(p, p, c)))
         .collect();
-    let body = body(root, &sections);
+    let body = body(root, &sections, rules(cfg));
     let names = names(list);
     let git = here && projects::in_git(root);
     let cells = cfg
@@ -774,11 +774,18 @@ fn section(projects: &Projects, project: &Path) -> Section {
     )
 }
 
+/// The file every workspace follows, when the canon has one turned on.
+pub fn rules(cfg: &Config) -> Option<&Path> {
+    let r = cfg.source.workspace_rules.as_path();
+    (!r.as_os_str().is_empty()).then_some(r)
+}
+
 /// The file canonize writes at the top of the workspace at `root` for the
-/// projects in `sections`: what the workspace holds, its CONTEXT.md and
-/// CANON.md whether they are there yet or not, so neither appearing changes
-/// it, then each project and the files to read there.
-pub fn body(root: &Path, sections: &[Section]) -> String {
+/// projects in `sections`: what the workspace holds, the canon's `rules` for
+/// every workspace, its CONTEXT.md and CANON.md, each whether it is there yet
+/// or not, so none appearing changes it, then each project and the files to
+/// read there.
+pub fn body(root: &Path, sections: &[Section], rules: Option<&Path>) -> String {
     let list: Vec<PathBuf> = sections.iter().map(|(p, _)| p.clone()).collect();
     let mut out = format!(
         "{HEADER}\n# Workspace for {}\n\nThis folder and every folder under it hold the working files (notes, replies, data) for {}. Write those files in the folder you were started in. Changes to a project itself, its code included, are made in that project, as they would be working inside it.\n",
@@ -789,8 +796,17 @@ pub fn body(root: &Path, sections: &[Section]) -> String {
             "the projects below"
         }
     );
+    out.push_str(
+        "\nBefore anything else, read these files when they are there, and follow them with every file they import through an `@path` line:\n\n",
+    );
+    if let Some(rules) = rules {
+        out.push_str(&format!(
+            "- `{}`: what to do in every workspace.\n",
+            rules.display()
+        ));
+    }
     out.push_str(&format!(
-        "\nBefore anything else, read these two files when they are there, and follow them with every file they import through an `@path` line:\n\n- `{}`: what to know working here. When you are told to remember something for this workspace, write it there.\n- `{}`: the conventions this workspace follows.\n",
+        "- `{}`: what to know working here. When you are told to remember something for this workspace, write it there.\n- `{}`: the conventions this workspace follows.\n",
         root.join(CONTEXT_FILE).display(),
         root.join(CANON_FILE).display()
     ));
@@ -891,7 +907,7 @@ pub fn refresh(cfg: &Config, projects: &Projects, edits: &[Edit]) -> Vec<Change>
                     None => section(projects, q),
                 })
                 .collect();
-            rewrites(cfg, &w.root, &w.root, &body(&w.root, &sections))
+            rewrites(cfg, &w.root, &w.root, &body(&w.root, &sections, rules(cfg)))
         })
         .collect()
 }
