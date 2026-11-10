@@ -7,7 +7,7 @@ description = "bring your rules to any coding agent - one canon of rules, conven
 authors = ["Pablo Antonio Hernández Hernández (safteinzz)"]
 license = "AGPL-3.0-only"
 readme = "README.md"
-repository = "https://gitlab.com/safteinzz/canonize"
+repository = "https://github.com/safteinzz/canonize"
 keywords = ["ai", "agents", "claude", "codex", "tui"]
 categories = ["command-line-utilities", "development-tools"]
 # README pictures are fetched over the network by crates.io from absolute raw

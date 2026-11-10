@@ -1,7 +1,5 @@
 # canonize (`canon`)
 
-> **Canonical:** [gitlab.com/safteinzz/canonize](https://gitlab.com/safteinzz/canonize) · **Mirror:** [github.com/safteinzz/canonize](https://github.com/safteinzz/canonize)
-
 <!-- desc:start -->
 bring your rules to any coding agent - one canon of rules, conventions and skills for the agents you use
 <!-- desc:end -->
@@ -18,7 +16,7 @@ No cargo yet? Rust installs the same way on every distro: [rustup.rs](https://ru
 
 ## Set up around what you already have
 
-![the setup wizard finding a moved canon, then F fixing every agent's setup](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/setup.gif)
+![the setup wizard finding a moved canon, then F fixing every agent's setup](https://raw.githubusercontent.com/safteinzz/canonize/main/readme-assets/setup.gif)
 
 ```bash
 canon            # first run: six questions, each already answered with what it found
@@ -30,7 +28,7 @@ Nothing is written until you say yes.
 
 ## See what every agent has
 
-![the agents tab: a card opened with Enter, a broken rules import fixed with f, the skills line linking them all](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/agents.gif)
+![the agents tab: a card opened with Enter, a broken rules import fixed with f, the skills line linking them all](https://raw.githubusercontent.com/safteinzz/canonize/main/readme-assets/agents.gif)
 
 Legend: green dot fully wired · yellow dot something needs fixing · hollow dot disabled
 
@@ -39,7 +37,7 @@ canon            # the dashboard: Agents, Skills, Conventions, Workspaces and MC
 canon status     # the same, printed
 ```
 
-![canon status printing the agents and projects tables with what is broken](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/status.png)
+![canon status printing the agents and projects tables with what is broken](https://raw.githubusercontent.com/safteinzz/canonize/main/readme-assets/status.png)
 
 A file that is yours is never counted as drift: it is named at the end, with what you can do about it.
 
@@ -53,7 +51,7 @@ canon delete -a <agent>   # delete everything canonize made for one agent
 
 ## Bring an agent's own skills in
 
-![the skills tab: a skill an agent kept itself adopted with Enter, every skill linked to that agent with a, then every missing link made with F](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/skills.gif)
+![the skills tab: a skill an agent kept itself adopted with Enter, every skill linked to that agent with a, then every missing link made with F](https://raw.githubusercontent.com/safteinzz/canonize/main/readme-assets/skills.gif)
 
 ```bash
 canon adopt <agent> my-skill  # move it into your canon, leave a link in its place
@@ -65,7 +63,7 @@ The agent finds the skill where it left it, so it sees no difference.
 
 ## Give each project the conventions it needs
 
-![the projects tab: a broken import repointed with Enter, then one convention added to every project with a](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/projects.gif)
+![the projects tab: a broken import repointed with Enter, then one convention added to every project with a](https://raw.githubusercontent.com/safteinzz/canonize/main/readme-assets/projects.gif)
 
 ```bash
 canon                             # tab to Projects: ↵ makes a folder a project; Conventions: who reads which
@@ -81,7 +79,7 @@ Nothing lands in the repo: the imports sit in a gitignored file. An agent that a
 
 ## Work on your projects from a folder outside their repos
 
-![the workspaces tab: a folder pointed at a project with c, a second project added in its card, and a convention of its own switched on with Enter](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/workspaces.gif)
+![the workspaces tab: a folder pointed at a project with c, a second project added in its card, and a convention of its own switched on with Enter](https://raw.githubusercontent.com/safteinzz/canonize/main/readme-assets/workspaces.gif)
 
 ```bash
 canon                                               # tab to Workspaces: c links a folder, ↵ opens its card
@@ -105,7 +103,7 @@ A token you type is kept outside your canon, readable by you alone, so your dotf
 
 ## Move your canon
 
-![canon move renaming the canon folder and repointing every import, link and shortcut that named the old path](https://gitlab.com/safteinzz/canonize/-/raw/main/readme-assets/move.png)
+![canon move renaming the canon folder and repointing every import, link and shortcut that named the old path](https://raw.githubusercontent.com/safteinzz/canonize/main/readme-assets/move.png)
 
 ```bash
 canon move canon ~/dotfiles/canon                     # the whole folder
