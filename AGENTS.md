@@ -1,8 +1,5 @@
-<!--
-AI-ONLY DOCUMENT. This file exists to give an AI agent the COMPLETE operating picture for this repo. Optimize for completeness and precision for the agent, not for human readability. Humans read README.md instead. FORMAT: machine-read; put each rule/point on ONE line, however long.
--->
+<!-- For AI agents, not people: README is for people. Every invariant and gotcha needed to change this repo, each with its one reason, telegraphic. Never how a fact was found or what changed. One point per line, never hard-wrapped. -->
 # AGENTS.md
-Brief for AI coding agent: invariants, gotchas, decisions needed to change this project correctly.
 
 ## What it is
 - canonize (binary `canon`) manages SOURCE folder user owns (rules file, conventions, skills, `canonize.toml`) and wires it into each coding agent's own folders. Holds no rules itself; crate ships only templates for `canon init`.
