@@ -7,7 +7,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use super::line_edit;
-use super::link_form::render_picker;
+use super::picker::{Pick, Picker, render_picker};
 use super::widgets::*;
 
 const FOLDER_HINT: &str = "ctrl-o to pick one under your scopes · or type a path anywhere";
@@ -20,7 +20,8 @@ pub(crate) struct ProjectForm {
     /// The folders `ctrl-o` picks from, as `canon status` would name them;
     /// none is a project, so none is marked as one.
     choices: Vec<(String, bool)>,
-    picking: Option<usize>,
+    /// The picker over `choices` while it is open.
+    picking: Option<Picker>,
     /// Why the last save was refused, shown in place of the note.
     pub(super) error: Option<String>,
 }
@@ -46,20 +47,15 @@ impl ProjectForm {
     pub(super) fn key(&mut self, key: KeyEvent) -> Named {
         use KeyCode::*;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if let Some(at) = self.picking {
-            let last = self.choices.len().saturating_sub(1);
-            match key.code {
-                Down | Char('j') => self.picking = Some((at + 1).min(last)),
-                Up | Char('k') => self.picking = Some(at.saturating_sub(1)),
-                Enter => {
-                    if let Some((name, _)) = self.choices.get(at) {
-                        self.folder = name.clone();
-                        self.back = 0;
-                    }
+        if let Some(picker) = &mut self.picking {
+            match picker.key(key) {
+                Pick::Pending => {}
+                Pick::Cancelled => self.picking = None,
+                Pick::Chose(name) => {
+                    self.folder = name;
+                    self.back = 0;
                     self.picking = None;
                 }
-                Esc => self.picking = None,
-                _ => {}
             }
             return Named::Pending;
         }
@@ -67,8 +63,7 @@ impl ProjectForm {
             if self.choices.is_empty() {
                 self.error = Some("nothing under your scopes is left to add: type a path".into());
             } else {
-                let at = self.choices.iter().position(|c| c.0 == self.folder.trim());
-                self.picking = Some(at.unwrap_or(0));
+                self.picking = Some(Picker::new(self.choices.clone(), self.folder.trim()));
             }
             return Named::Pending;
         }
@@ -142,7 +137,7 @@ pub(super) fn render_project_form(f: &mut Frame, area: Rect, form: &ProjectForm)
             .wrap(Wrap { trim: false }),
         r,
     );
-    if let Some(at) = form.picking {
-        render_picker(f, area, "under your scopes", &form.choices, at);
+    if let Some(picker) = &form.picking {
+        render_picker(f, area, "under your scopes", picker);
     }
 }

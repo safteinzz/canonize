@@ -9,6 +9,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 
 use super::line_edit;
+use super::picker::{Pick, Picker, render_picker};
 use super::widgets::*;
 
 /// What each field says while it is empty.
@@ -34,8 +35,8 @@ pub(crate) struct LinkForm {
     /// What `ctrl-o` picks from, as `canon status` names them, each with
     /// whether it is a folder that is not a project yet.
     choices: Vec<(String, bool)>,
-    /// The picked choice while the picker is open.
-    picking: Option<usize>,
+    /// The picker over `choices` while it is open.
+    picking: Option<Picker>,
     /// Why the last save was refused, shown in place of the note.
     pub(super) error: Option<String>,
 }
@@ -90,20 +91,15 @@ impl LinkForm {
     pub(super) fn key(&mut self, key: KeyEvent) -> Linked {
         use KeyCode::*;
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if let Some(at) = self.picking {
-            let last = self.choices.len().saturating_sub(1);
-            match key.code {
-                Down | Char('j') => self.picking = Some((at + 1).min(last)),
-                Up | Char('k') => self.picking = Some(at.saturating_sub(1)),
-                Enter => {
-                    if let Some((name, _)) = self.choices.get(at) {
-                        self.project = name.clone();
-                        self.backs[1] = 0;
-                    }
+        if let Some(picker) = &mut self.picking {
+            match picker.key(key) {
+                Pick::Pending => {}
+                Pick::Cancelled => self.picking = None,
+                Pick::Chose(name) => {
+                    self.project = name;
+                    self.backs[1] = 0;
                     self.picking = None;
                 }
-                Esc => self.picking = None,
-                _ => {}
             }
             return Linked::Pending;
         }
@@ -111,8 +107,7 @@ impl LinkForm {
             if self.choices.is_empty() {
                 self.error = Some("nothing to pick: type the project's path".into());
             } else {
-                let at = self.choices.iter().position(|c| c.0 == self.project.trim());
-                self.picking = Some(at.unwrap_or(0));
+                self.picking = Some(Picker::new(self.choices.clone(), self.project.trim()));
             }
             return Linked::Pending;
         }
@@ -243,69 +238,7 @@ pub(super) fn render_link_form(f: &mut Frame, area: Rect, form: &LinkForm) {
             .wrap(Wrap { trim: false }),
         r,
     );
-    if let Some(at) = form.picking {
-        render_picker(f, area, "projects", &form.choices, at);
+    if let Some(picker) = &form.picking {
+        render_picker(f, area, "projects", picker);
     }
-}
-
-/// The choices to pick from under `title`, scrolled so `at` is on screen,
-/// each marked when it is a folder that is not a project yet.
-pub(super) fn render_picker(
-    f: &mut Frame,
-    area: Rect,
-    title: &str,
-    choices: &[(String, bool)],
-    at: usize,
-) {
-    let width = box_width(area.width);
-    // The choices, then a blank and the key row.
-    let rect = box_area(
-        area,
-        width,
-        box_height(choices.len() as u16 + 2, area.height),
-    );
-    f.render_widget(Clear, rect);
-    let block = box_block(Color::Cyan, title);
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-    let shown = (inner.height as usize).saturating_sub(2).max(1);
-    let top = at.saturating_sub(shown - 1);
-    let lines: Vec<Line> = choices
-        .iter()
-        .enumerate()
-        .skip(top)
-        .take(shown)
-        .map(|(i, (name, folder))| {
-            let style = if i == at {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let mut spans = vec![Span::styled(format!(" {name} "), style)];
-            if *folder {
-                spans.push(Span::styled(
-                    " not a project yet",
-                    Style::default().add_modifier(Modifier::DIM),
-                ));
-            }
-            Line::from(spans)
-        })
-        .collect();
-    f.render_widget(
-        Paragraph::new(lines),
-        Rect {
-            height: shown as u16,
-            ..inner
-        },
-    );
-    let keys = Rect {
-        y: inner.y + inner.height.saturating_sub(1),
-        height: 1,
-        ..inner
-    };
-    f.render_widget(Paragraph::new(box_hint(PICKER_KEYS)), keys);
-    vscrollbar(f, rect, choices.len(), top, shown);
 }

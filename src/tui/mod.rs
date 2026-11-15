@@ -8,6 +8,7 @@ mod job;
 mod line_edit;
 mod link_form;
 mod mcp;
+mod picker;
 mod project_form;
 mod project_tab;
 mod render;
@@ -642,27 +643,10 @@ impl App {
         self.anywhere(key)
     }
 
-    /// Where a motion key takes a cursor at `at` in a list of `rows`: `j/k`
-    /// and the arrows a row, `ctrl-d/u` and the page keys half the rows the
-    /// list showed on its last frame (`page`), `g/G`, Home and End to either
-    /// end; `None` for any other key. Every list asks it before its own keys,
-    /// so `ctrl-d` never reaches a `d`.
+    /// Where a motion key takes a cursor at `at` in a list of `rows`, paged
+    /// by the rows the list showed on its last frame (`page`), as `motion`.
     pub(super) fn motion(&self, key: KeyEvent, at: usize, rows: usize) -> Option<usize> {
-        use KeyCode::*;
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let half = (self.page.get() / 2).max(1);
-        let to = match key.code {
-            Down | Char('j') => at + 1,
-            Up | Char('k') => at.saturating_sub(1),
-            PageDown => at + half,
-            PageUp => at.saturating_sub(half),
-            Char('d') if ctrl => at + half,
-            Char('u') if ctrl => at.saturating_sub(half),
-            Char('g') | Home => 0,
-            Char('G') | End => usize::MAX,
-            _ => return None,
-        };
-        Some(to.min(rows.saturating_sub(1)))
+        motion(key, at, rows, self.page.get())
     }
 
     /// The help group of the screen in front of the user, by its heading in
@@ -1297,36 +1281,9 @@ impl App {
         });
     }
 
-    /// What the `/` filter keeps of `rows`, each named by `name`, in their
-    /// order: all of them with no query, else the ones holding it, case aside,
-    /// and only when none does, the ones holding its characters in order, so
-    /// `cl` still finds `dev/crates/cli` while `api` never drowns the `api`
-    /// folder in every long name that happens to spell it out.
+    /// What the tab's `/` filter keeps of `rows`, each named by `name`.
     fn kept<T: Copy>(&self, rows: Vec<T>, name: impl Fn(T) -> String) -> Vec<T> {
-        let q = self.query.trim().to_lowercase();
-        if q.is_empty() {
-            return rows;
-        }
-        let named: Vec<(T, String)> = rows
-            .into_iter()
-            .map(|r| (r, name(r).to_lowercase()))
-            .collect();
-        let holding: Vec<T> = named
-            .iter()
-            .filter(|(_, n)| n.contains(&q))
-            .map(|(r, _)| *r)
-            .collect();
-        if !holding.is_empty() {
-            return holding;
-        }
-        named
-            .into_iter()
-            .filter(|(_, n)| {
-                let mut chars = n.chars();
-                q.chars().all(|c| chars.any(|h| h == c))
-            })
-            .map(|(r, _)| r)
-            .collect()
+        kept(&self.query, rows, name)
     }
 
     /// The agents installed here, by index into `cfg.agents`: one that is
@@ -1878,6 +1835,61 @@ fn undefined_server(changes: &[Change]) -> Option<(&str, Option<&PathBuf>)> {
         Change::Batch { changes, .. } => undefined_server(changes),
         _ => None,
     })
+}
+
+/// Where a motion key takes a cursor at `at` in a list of `rows`: `j/k` and
+/// the arrows a row, `ctrl-d/u` and the page keys half of `page` (the rows the
+/// list showed on its last frame), `g/G`, Home and End to either end; `None`
+/// for any other key. Every list asks it before its own keys, so `ctrl-d`
+/// never reaches a `d`.
+fn motion(key: KeyEvent, at: usize, rows: usize, page: usize) -> Option<usize> {
+    use KeyCode::*;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let half = (page / 2).max(1);
+    let to = match key.code {
+        Down | Char('j') => at + 1,
+        Up | Char('k') => at.saturating_sub(1),
+        PageDown => at + half,
+        PageUp => at.saturating_sub(half),
+        Char('d') if ctrl => at + half,
+        Char('u') if ctrl => at.saturating_sub(half),
+        Char('g') | Home => 0,
+        Char('G') | End => usize::MAX,
+        _ => return None,
+    };
+    Some(to.min(rows.saturating_sub(1)))
+}
+
+/// What the filter `query` keeps of `rows`, each named by `name`, in their
+/// order: all of them with no query, else the ones holding it, case aside,
+/// and only when none does, the ones holding its characters in order, so
+/// `cl` still finds `dev/crates/cli` while `api` never drowns the `api`
+/// folder in every long name that happens to spell it out.
+fn kept<T: Copy>(query: &str, rows: Vec<T>, name: impl Fn(T) -> String) -> Vec<T> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return rows;
+    }
+    let named: Vec<(T, String)> = rows
+        .into_iter()
+        .map(|r| (r, name(r).to_lowercase()))
+        .collect();
+    let holding: Vec<T> = named
+        .iter()
+        .filter(|(_, n)| n.contains(&q))
+        .map(|(r, _)| *r)
+        .collect();
+    if !holding.is_empty() {
+        return holding;
+    }
+    named
+        .into_iter()
+        .filter(|(_, n)| {
+            let mut chars = n.chars();
+            q.chars().all(|c| chars.any(|h| h == c))
+        })
+        .map(|(r, _)| r)
+        .collect()
 }
 
 /// A gate's title, naming what it is in front of by the first change it runs.

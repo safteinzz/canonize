@@ -666,7 +666,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         // Every letter goes into the query here, so only keys that are not
         // letters are offered.
         spans.push(Span::styled(
-            format!("   {} match   ↵ keep{SEP}{BACK}", app.row_count()),
+            format!("   {} match   {KEEP}{SEP}{BACK}", app.row_count()),
             dim,
         ));
         f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -943,6 +943,8 @@ const HELP: &[HelpSection] = &[
             ("h/l ←→ tab", "move between the buttons"),
             ("↵", "select, or pick from a list"),
             ("j/k ↑↓", "move in a list or scroll a message"),
+            ("/", "find in a list opened with ctrl-o, esc drops it"),
+            ("h/l ←→", "pan a list opened with ctrl-o wider than the box"),
             ("esc", "cancel, or close a message"),
         ],
     ),

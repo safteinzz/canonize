@@ -109,6 +109,7 @@ pub(super) const QUIT: &str = "q quit";
 pub(super) const HELP: &str = "? help";
 pub(super) const SELECT: &str = "↵ select";
 pub(super) const PICK: &str = "↵ pick";
+pub(super) const KEEP: &str = "↵ keep";
 pub(super) const NEXT_SUBMIT: &str = "↵ next/submit";
 pub(super) const BACK: &str = "esc back";
 pub(super) const CANCEL: &str = "esc cancel";
@@ -120,6 +121,7 @@ pub(super) const SEP: &str = " · ";
 pub(super) const GATE_KEYS: &[&str] = &[SELECT, CANCEL];
 pub(super) const TYPED_KEYS: &[&str] = &["↵ del", CANCEL];
 pub(super) const PICKER_KEYS: &[&str] = &[PICK, CANCEL];
+pub(super) const FINDER_KEYS: &[&str] = &[PICK, FIND, CANCEL];
 pub(super) const FORM_KEYS: &[&str] = &[NEXT_SUBMIT, CANCEL];
 pub(super) const READER_KEYS: &[&str] = &[CLOSE];
 
@@ -215,4 +217,19 @@ pub(super) fn vscrollbar(f: &mut Frame, area: Rect, total: usize, top: usize, vi
         .begin_symbol(None)
         .end_symbol(None);
     f.render_stateful_widget(bar, area.inner(Margin::new(0, 1)), &mut state);
+}
+
+/// A scrollbar along `area`'s bottom border for content `total` columns wide,
+/// `view` of them on screen from `left`, where `area` is the bordered rect it
+/// sits on. Nothing is drawn when every column fits.
+pub(super) fn hscrollbar(f: &mut Frame, area: Rect, total: usize, left: usize, view: usize) {
+    if total <= view {
+        return;
+    }
+    let mut state = ScrollbarState::new(total - view).position(left);
+    let bar = Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .thumb_symbol("■");
+    f.render_stateful_widget(bar, area.inner(Margin::new(1, 0)), &mut state);
 }
