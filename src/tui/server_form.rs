@@ -130,7 +130,7 @@ impl ServerForm {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let n = self.rows().len();
         // The kind types nothing, so its horizontal keys point at a button and
-        // stop at the edge; you leave it with Tab, Enter or the vertical keys.
+        // stop at the edge; you leave it with Tab or the vertical keys.
         if self.row() == Row::Kind && !ctrl {
             match key.code {
                 Left | Char('h') => {
@@ -158,11 +158,16 @@ impl ServerForm {
         }
         match key.code {
             Esc => return Filled::Cancelled,
-            // Enter walks down the form and saves from its last field.
-            Enter if self.focus + 1 < n => self.focus += 1,
+            // Enter saves from any field; a refusal puts the cursor on the
+            // blank one it names.
             Enter => match self.saved() {
                 Ok(saved) => return Filled::Done(saved),
-                Err(why) => self.error = Some(why),
+                Err((row, why)) => {
+                    if let Some(i) = self.rows().iter().position(|r| *r == row) {
+                        self.focus = i;
+                    }
+                    self.error = Some(why.into());
+                }
             },
             _ => {
                 if let Some((text, back)) = self.field() {
@@ -176,16 +181,16 @@ impl ServerForm {
     /// The server the form describes, or which starred field is still blank.
     /// What the form does not show of a server being edited (its headers, its
     /// env, a token it reads from a variable) stays as it was.
-    fn saved(&self) -> Result<Saved, String> {
+    fn saved(&self) -> Result<Saved, (Row, &'static str)> {
         let name = self.name.trim();
         if name.is_empty() {
-            return Err("name is required".into());
+            return Err((Row::Name, "name is required"));
         }
         let old = self.old.as_ref().map(|s| &s.spec);
         let spec = if self.remote {
             let url = self.url.trim();
             if url.is_empty() {
-                return Err("url is required".into());
+                return Err((Row::First, "url is required"));
             }
             let (bearer, headers) = match old {
                 Some(Spec::Http {
@@ -201,7 +206,7 @@ impl ServerForm {
         } else {
             let command = self.command.trim();
             if command.is_empty() {
-                return Err("command is required".into());
+                return Err((Row::First, "command is required"));
             }
             let env = match old {
                 Some(Spec::Stdio { env, .. }) => env.clone(),

@@ -41,7 +41,7 @@ Type "c"
 Sleep 1s
 Type "~/issues/shop"
 Sleep 500ms
-Enter
+Tab
 Sleep 500ms
 Ctrl+O
 Sleep 1s

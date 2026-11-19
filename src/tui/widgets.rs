@@ -110,7 +110,7 @@ pub(super) const HELP: &str = "? help";
 pub(super) const SELECT: &str = "↵ select";
 pub(super) const PICK: &str = "↵ pick";
 pub(super) const KEEP: &str = "↵ keep";
-pub(super) const NEXT_SUBMIT: &str = "↵ next/submit";
+pub(super) const SUBMIT: &str = "↵ submit";
 pub(super) const BACK: &str = "esc back";
 pub(super) const CANCEL: &str = "esc cancel";
 pub(super) const CLOSE: &str = "esc close";
@@ -122,7 +122,7 @@ pub(super) const GATE_KEYS: &[&str] = &[SELECT, CANCEL];
 pub(super) const TYPED_KEYS: &[&str] = &["↵ del", CANCEL];
 pub(super) const PICKER_KEYS: &[&str] = &[PICK, CANCEL];
 pub(super) const FINDER_KEYS: &[&str] = &[PICK, FIND, CANCEL];
-pub(super) const FORM_KEYS: &[&str] = &[NEXT_SUBMIT, CANCEL];
+pub(super) const FORM_KEYS: &[&str] = &[SUBMIT, CANCEL];
 pub(super) const READER_KEYS: &[&str] = &[CLOSE];
 
 /// The line of keys a box ends with, as the last row of its body. Every kind

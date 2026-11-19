@@ -1,7 +1,7 @@
 //! The setup wizard: six questions, each pre-filled with what canonize found
 //! and a note saying why, so nothing is chosen for the user unseen.
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::prelude::*;
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 
@@ -50,6 +50,9 @@ pub(crate) struct Wizard {
     /// The cursor of each typed answer, as characters after it, in the order
     /// folder, skills, projects (`line_edit::edit`).
     backs: [usize; 3],
+    /// The folder the answers were last listed for, so leaving the folder
+    /// question unchanged keeps what was picked since.
+    filled_for: String,
 }
 
 pub(crate) enum Outcome {
@@ -82,6 +85,7 @@ impl Wizard {
             skills: "skills".to_string(),
             projects: crate::projects::guess().join(", "),
             backs: [0; 3],
+            filled_for: String::new(),
         };
         w.fill();
         w
@@ -99,6 +103,7 @@ impl Wizard {
     /// List what the chosen folder offers for every later step, with what was
     /// found preselected.
     fn fill(&mut self) {
+        self.filled_for = self.folder.trim().to_string();
         let root = self.root();
         let found_rules = self
             .found_here()
@@ -232,24 +237,47 @@ impl Wizard {
         use KeyCode::*;
         let i = self.index();
         let typing = matches!(self.step, Step::Folder | Step::Skills | Step::Projects);
-        match key.code {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Ctrl-j/k step between questions like tab and shift-tab.
+        let code = match key.code {
+            Char('j') if ctrl => Tab,
+            Char('k') if ctrl => BackTab,
+            code => code,
+        };
+        match code {
             Esc => return Outcome::Cancelled,
             BackTab => self.step = self.steps()[i.saturating_sub(1)],
-            // Tab steps like Enter but never submits from the last question.
-            Enter | Tab => {
+            // Enter finishes from any question; a blank required one gets the
+            // cursor instead.
+            Enter => {
                 if self.step == Step::Folder {
                     if self.folder.trim().is_empty() {
                         return Outcome::Pending;
                     }
-                    self.fill();
+                    if self.folder.trim() != self.filled_for {
+                        self.fill();
+                    }
+                }
+                if self.skills.trim().is_empty() {
+                    self.step = Step::Skills;
+                    return Outcome::Pending;
+                }
+                return Outcome::Done(self.choice());
+            }
+            Tab => {
+                if self.step == Step::Folder {
+                    if self.folder.trim().is_empty() {
+                        return Outcome::Pending;
+                    }
+                    if self.folder.trim() != self.filled_for {
+                        self.fill();
+                    }
                 }
                 if self.step == Step::Skills && self.skills.trim().is_empty() {
                     return Outcome::Pending;
                 }
-                match self.steps().get(i + 1) {
-                    Some(next) => self.step = *next,
-                    None if key.code == Enter => return Outcome::Done(self.choice()),
-                    None => {}
+                if let Some(next) = self.steps().get(i + 1) {
+                    self.step = *next;
                 }
             }
             _ if typing => {

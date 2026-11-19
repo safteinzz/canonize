@@ -30,15 +30,15 @@ Show
 Type "canon"
 Enter
 Sleep 2s
-Enter
+Tab
 Sleep 1.2s
-Enter
+Tab
 Sleep 900ms
-Enter
+Tab
 Sleep 900ms
-Enter
+Tab
 Sleep 900ms
-Enter
+Tab
 Sleep 900ms
 Enter
 Sleep 2s

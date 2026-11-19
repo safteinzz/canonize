@@ -920,8 +920,9 @@ const HELP: &[HelpSection] = &[
     (
         "in set up",
         &[
-            ("↵ tab", "the next question, ↵ finishes on the last"),
-            ("shift-tab", "the previous question"),
+            ("tab shift-tab", "the next, previous question"),
+            ("ctrl-j ctrl-k", "the next, previous question"),
+            ("↵", "finish, from any question"),
             ("j/k ↑↓", "pick an answer from a list"),
             ("esc", "cancel set up"),
         ],
@@ -932,7 +933,7 @@ const HELP: &[HelpSection] = &[
             ("ctrl-j/k ↑↓", "the next, previous field"),
             ("tab shift-tab", "the next, previous field"),
             ("h/l ←→", "step a choice"),
-            ("↵", "the next field, and submit on the last"),
+            ("↵", "submit, from any field"),
             ("esc", "cancel"),
         ],
     ),

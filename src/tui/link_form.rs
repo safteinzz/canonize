@@ -125,19 +125,29 @@ impl LinkForm {
         }
         match key.code {
             Esc => return Linked::Cancelled,
-            Enter if self.focus + 1 < n => self.focus += 1,
+            // Enter saves from any field; a refusal puts the cursor on the
+            // blank one it names.
             Enter => {
                 let workspace = self
                     .fixed
                     .clone()
                     .unwrap_or_else(|| self.workspace.trim().to_string());
                 let project = self.project.trim().to_string();
-                if workspace.is_empty() {
-                    self.error = Some("folder is required".into());
+                let blank = if workspace.is_empty() {
+                    Some((Row::Workspace, "folder is required"))
                 } else if project.is_empty() {
-                    self.error = Some("project is required".into());
+                    Some((Row::Project, "project is required"))
                 } else {
-                    return Linked::Done(workspace, project);
+                    None
+                };
+                match blank {
+                    Some((row, why)) => {
+                        if let Some(i) = self.rows().iter().position(|r| *r == row) {
+                            self.focus = i;
+                        }
+                        self.error = Some(why.into());
+                    }
+                    None => return Linked::Done(workspace, project),
                 }
             }
             _ => {
